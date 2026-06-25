@@ -1,0 +1,14 @@
+# Runtime artifacts — not tracked
+debug_payloads/
+blocked/
+evidence/
+pending/
+inflight/
+
+# Keep directory structure via .gitkeep
+!pending/.gitkeep
+!inflight/.gitkeep
+!evidence/.gitkeep
+!blocked/.gitkeep
+!templates/.gitkeep
+!debug_payloads/.gitkeep
