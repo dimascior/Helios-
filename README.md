@@ -484,7 +484,7 @@ A valid gate must bind the exact command and include these required base fields:
   "expires_utc": "2026-07-02T12:00:00Z",
   "command": "pwd; echo EXIT=$?",
   "command_sha256": "<sha256 of exact command text>",
-  "working_directory": "C:\\Users\\dimas\\Desktop\\Engineering",
+  "working_directory": "C:\\Users\\you\\project",
   "shell": "bash",
   "risk_tier": 0,
   "exit_capture": "suffix",
@@ -633,8 +633,8 @@ If a pending gate has the same SHA-256 or command text but fails validation, the
 ```text
 GATE REJECTED: closest gate pwd-probe.gate.json matched sha256 but failed validation:
 - working_directory mismatch
-  gate:   C:\Users\dimas\Desktop\Engineering
-  actual: C:\Users\dimas\Desktop\Engineering\src
+  gate:   C:\Users\you\project
+  actual: C:\Users\you\project\src
 ```
 
 Common diagnostics include:
