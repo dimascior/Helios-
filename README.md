@@ -4,7 +4,32 @@ Helios is a command-gate policy layer for Claude Code and other AI agent tool ex
 
 It turns shell execution into an explicit, auditable protocol. Before an agent can run a `Bash` or `PowerShell` command, it must create a matching single-use gate file that explains what the command is, why it is needed, what output is expected, how the result should be interpreted, and what decision the result supports.
 
+Each command an LLM wants to execute on your system must go through a JSON gate file with a valid pre-execution command hash. The agent makes the request by filling out the gate schema parameters and running the command. Once the hash validates against the declared scope and schema, the gate returns context for that one-off command and surfaces any errors found during pre-execution validation. This verifies the command was authorized based on the scope of the command within the schema parameters, forcing the agent to explain:
+
+- **why** the command is needed
+- **what** the expected output is
+- **what** the actual output means
+- **why** the next command is needed
+
+Helios does not decide whether a command is "morally okay." It decides whether this exact command, in this exact shell, from this exact working directory, with this exact hash and declared risk boundary, is eligible to reach Claude Code's normal permission flow.
+
 Helios is not model-specific. Any model or agent can operate through it if it can write a valid `.gate.json` file and follow the gate lifecycle. The purpose is not only command safety. Helios also creates clean evidence boundaries for studying when an AI system is blocked, routed, or confused: command text, structured reasoning, command output, expected-vs-actual comparison, or next-command derivation.
+
+## Design Principles
+
+### The hash is not the trust boundary
+
+The hash binds to the exact command string, not to a human-authorized allowlist. If the model is allowed to write gates, then the model can generate both sides: command and gate. The hash mainly prevents drift. It proves that the explanation, cwd, shell, tier, stop conditions, and evidence plan correspond to the exact command that is about to run. It stops "explain one command, run another."
+
+### Base fields are cheap enough to leave on
+
+The base fields are short: `need`, `expected`, `actual_means`, and `next_logic`. The gate program treats those as required even for Tier 0 and Tier 1, while Tier 2 adds `stop_conditions` and Tier 3 adds `read_write_impact`. The overhead is mostly a few hundred tokens plus one gate file write, not a major runtime cost compared with the value: it prevents the model from silently changing command purpose after seeing output.
+
+Tier 0 can be terse. Tier 2/3 should be explicit. For experimental model testing, leaving it on is also cleaner because it keeps the instrumentation constant. If you toggle it, you add another variable: now you cannot tell whether a guardrail changed because of command content, explanation content, or missing explanation structure.
+
+### The gate is binding and observable
+
+Authorization comes from Tier 4 hard blocks, Claude Code's permission flow, and whatever human or local policy controls whether eligible commands actually execute. The gate is consumed once. Rerunning the same command needs a new gate, even if the command text is identical.
 
 ## Core Idea
 
@@ -36,12 +61,17 @@ The gate lifecycle is single-use.
 
 1. The agent attempts a `Bash` or `PowerShell` command.
 2. Claude Code fires the `PreToolUse` hook.
-3. `gate_check.ps1` hashes the exact command and searches `pending/`.
-4. If no valid gate exists, the hook blocks the command and reports the required SHA-256.
-5. If a valid gate exists, the hook moves it to `inflight/` and returns `{}`.
-6. Claude Code proceeds through its normal permission flow.
-7. After execution, `evidence_capture.ps1` moves the gate to `evidence/` and writes result sidecars.
-8. The evidence hook injects context telling the agent to compare expected output against actual output before creating the next gate.
+3. `gate_check.ps1` reads the hook payload, extracts `tool_input.command`, computes the SHA-256 of the exact command string, and classifies the command tier via `tier_classifier.ps1`.
+4. Tier 4 commands are blocked unconditionally, even if a gate exists.
+5. If no valid gate exists, the hook blocks the command and reports the required SHA-256.
+6. If a valid gate exists, the hook validates every field — command text, hash, cwd, shell, expiry, risk tier, required fields, write-impact declarations, exit-capture rules, and chain rules — then moves it to `inflight/` and returns `{}`.
+7. Claude Code proceeds through its normal permission flow.
+8. After execution, `evidence_capture.ps1` looks for the matching inflight gate — preferably by `tool_use_id`, then falls back to command hash. It writes evidence sidecars (`.result.json`, `.tool_response.json`, `.stdout.txt`, `.stderr.txt`) and moves the consumed gate to `evidence/`.
+9. The evidence hook injects context telling the agent to compare expected output against actual output before creating the next gate.
+
+The agent can discover the hash by first attempting the command without a gate, reading the denied SHA-256 from the block message, writing a matching gate, then retrying the exact same command text.
+
+Gates that cannot be matched to an inflight record are logged as orphans with a generated correlation ID.
 
 ## Directory Structure
 
@@ -61,6 +91,16 @@ The gate lifecycle is single-use.
   templates/                Gate templates and catalog entries
 ```
 
+### Directory Integrity
+
+On every invocation, `gate_check.ps1` checks that the gate root and all required subdirectories exist and are not reparse points (junctions or symlinks). This prevents an attacker from redirecting the gate store to a location they control.
+
+### Tier Classification
+
+The tier classifier loads patterns from `command-policy.json` at runtime and exports three functions: `Get-CommandTier`, `Test-ChainViolation`, and `Test-WriteIndicator`. Risk logic is not spread across memory or hooks; the policy file is the single operational source for tier patterns and write indicators.
+
+If an `operating-catalog.json` exists in `templates/`, the classifier checks it after Tier 4 but before Tier 3, allowing project-specific pattern overrides with template suggestions.
+
 ## Risk Tiers
 
 | Tier | Category | Examples | Additional requirements |
@@ -73,11 +113,17 @@ The gate lifecycle is single-use.
 
 Tier 4 commands are blocked even if a gate exists.
 
+### Write Indicators
+
+If a command matches any write indicator pattern (e.g., `git commit`, `rm`, `> `, `Set-Content`), the gate must declare `read_write_impact` with a non-empty, non-`["none"]` `writes` array — regardless of tier. This catches cases where a Tier 0 command still performs writes.
+
 ## Gate Schema
 
 The gate file must be JSON and must be placed in `.command-gate/pending/` before the command is retried.
 
 A minimal Tier 0 gate looks like this:
+
+A valid gate must bind the exact command and include these required base fields:
 
 ```json
 {
@@ -136,9 +182,13 @@ Commands with write indicators require `read_write_impact.writes`. This is enfor
 
 ## Exit Capture
 
-Claude Code hook payloads may include `stdout`, `stderr`, and `interrupted`, but they do not reliably include a native process exit code. Helios therefore requires commands to expose their own exit code as `EXIT=<number>` unless the gate explicitly marks exit capture as not applicable.
+Exit capture is one of the most important design pieces. Claude Code's `PostToolUseFailure` payload does not include `tool_response`, so when a command exits nonzero normally, Helios may lose stdout, stderr, and exit code. Helios therefore requires commands to expose their own exit code as `EXIT=<number>` unless the gate explicitly marks exit capture as not applicable.
 
-Supported modes:
+| Mode | When to Use | Behavior |
+|------|------------|----------|
+| `suffix` | Simple commands | Command ends with an approved exit-capture suffix (e.g., `; echo EXIT=$?`). Tool may exit nonzero and trigger `PostToolUseFailure`, losing `tool_response`. |
+| `wrapper_required` | Commands that may fail | Wrapper captures the real exit code, prints `EXIT=<code>`, and exits 0. Tool always triggers `PostToolUse` so the evidence hook receives full output. Wrapper commands are exempt from chain detection. |
+| `not_applicable` | No meaningful exit code | Requires an approved reason: `pure_output`, `no_exit_code_semantic`, `interactive_tool`, or `background_process`. |
 
 ### `suffix`
 
@@ -184,7 +234,7 @@ Wrapper gates must declare the semantic command identity:
 "wrapper_reason": "The semantic command may return nonzero and must be captured as evidence rather than becoming a tool-level failure."
 ```
 
-The full command hash protects the complete wrapper. The wrapped command hash documents the command being measured inside the wrapper.
+The full command hash protects the complete wrapper. The wrapped command hash documents the command being measured inside the wrapper. The full command must also pass structural validation: it must contain the shell-specific marker (`echo "EXIT=` for bash, `Write-Host "EXIT=` for PowerShell) and end with `exit 0`.
 
 ### `not_applicable`
 
@@ -199,7 +249,7 @@ The reason must be approved by `command-policy.json`.
 
 ## Chain Detection
 
-Commands containing `;`, `&&`, `||`, or `|` outside quoted strings are treated as chained commands. Chained commands must declare:
+Commands containing `;`, `&&`, `||`, or `|` outside single-quoted strings are treated as chained commands. Chained commands must declare:
 
 ```json
 "multi_command": true,
@@ -210,6 +260,8 @@ Commands containing `;`, `&&`, `||`, or `|` outside quoted strings are treated a
 ```
 
 Undeclared chaining is blocked.
+
+The detector is single-quote aware: operators inside `'...'` are exempted. Double-quote false positives deliberately overblock (safe direction). This is a strict policy — no chain exemptions exist except for wrapper-mode commands, where the wrapper structure is the approved pattern.
 
 Exit-capture suffixes and wrapper scaffolding are handled by policy. If your command includes a suffix such as `; echo EXIT=$?`, either the suffix must be recognized as chain-exempt by `tier_classifier.ps1`, or the gate must declare the command as `multi_command: true` with `segments`.
 
@@ -343,6 +395,8 @@ Use `debug_hook.ps1` first when installing Helios in a new Claude Code environme
 - `cwd`
 - `tool_use_id`
 - `tool_response.stdout` and `tool_response.stderr` for `PostToolUse`
+
+Create gate files in `pending/` before issuing commands. The agent discovers the required SHA-256 by attempting the command, reading the hash from the block message, and writing a gate that matches.
 
 ## Validation Checklist
 
