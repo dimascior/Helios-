@@ -609,9 +609,13 @@ For guardrail localization, do not give the tested model the full operator playb
 
 ## Setup
 
-Place `.command-gate/` in the project root. The hook scripts derive `$GateRoot` automatically from their own location (`Split-Path $PSScriptRoot -Parent`), so no path editing is needed — just update the hook command paths in `settings.json` to point to your copy.
+### No path editing required
 
-Configure Claude Code hooks in `~/.claude/settings.json`, replacing `<project>` with the absolute path to your project root:
+The hook scripts derive `$GateRoot` from their own filesystem location using `Split-Path $PSScriptRoot -Parent`. This means `$GateRoot` always resolves to the `.command-gate/` directory that contains the `hooks/` folder, regardless of where the project is cloned. No hardcoded paths exist in the hook scripts.
+
+### Project-level configuration (committed)
+
+This repository ships `.claude/settings.json` with hook wiring that uses relative paths via `Join-Path $PWD`. When Claude Code opens a project, it reads this file automatically. Anyone who clones the repo gets working hooks with no manual setup.
 
 ```json
 {
@@ -623,7 +627,7 @@ Configure Claude Code hooks in `~/.claude/settings.json`, replacing `<project>` 
           {
             "type": "command",
             "shell": "powershell",
-            "command": "& '<project>\\.command-gate\\hooks\\gate_check.ps1'",
+            "command": "& (Join-Path $PWD '.command-gate\\hooks\\gate_check.ps1')",
             "timeout": 15
           }
         ]
@@ -636,7 +640,7 @@ Configure Claude Code hooks in `~/.claude/settings.json`, replacing `<project>` 
           {
             "type": "command",
             "shell": "powershell",
-            "command": "& '<project>\\.command-gate\\hooks\\evidence_capture.ps1'",
+            "command": "& (Join-Path $PWD '.command-gate\\hooks\\evidence_capture.ps1')",
             "timeout": 15
           }
         ]
@@ -649,7 +653,7 @@ Configure Claude Code hooks in `~/.claude/settings.json`, replacing `<project>` 
           {
             "type": "command",
             "shell": "powershell",
-            "command": "& '<project>\\.command-gate\\hooks\\evidence_capture.ps1'",
+            "command": "& (Join-Path $PWD '.command-gate\\hooks\\evidence_capture.ps1')",
             "timeout": 15
           }
         ]
@@ -658,6 +662,36 @@ Configure Claude Code hooks in `~/.claude/settings.json`, replacing `<project>` 
   }
 }
 ```
+
+### Local overrides (not committed)
+
+`.claude/settings.local.json` is gitignored. Use it for machine-specific overrides — for example, if you install `.command-gate/` at a shared location instead of the project root, or if you need to override the timeout:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "shell": "powershell",
+            "command": "& 'D:\\shared\\.command-gate\\hooks\\gate_check.ps1'",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+### Global configuration (alternative)
+
+If you prefer to wire hooks globally instead of per-project, add the configuration to `~/.claude/settings.json` with absolute paths. Global hooks apply to every Claude Code session, not just this project.
+
+### Verifying the installation
 
 Use `debug_hook.ps1` first when installing Helios in a new Claude Code environment. Confirm the actual payload contains:
 
