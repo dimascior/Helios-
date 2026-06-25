@@ -1,12 +1,13 @@
 Output helios-demo.gif
 
 Set Shell "powershell"
-Set FontSize 16
+Set FontSize 14
 Set Width 1200
 Set Height 800
 Set Theme "Dracula"
 Set Padding 20
-Set TypingSpeed 40ms
+Set TypingSpeed 30ms
+Set Framerate 10
 
 Hide
 Type "cd C:\Users\dimas\Desktop\MythosJustAFable"
@@ -16,4 +17,4 @@ Show
 
 Type ".\gate-demo.ps1"
 Enter
-Sleep 35s
+Sleep 120s
