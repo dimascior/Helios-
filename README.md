@@ -663,29 +663,11 @@ This repository ships `.claude/settings.json` with hook wiring that uses relativ
 }
 ```
 
-### Local overrides (not committed)
+### Local overrides (optional, not committed)
 
-`.claude/settings.local.json` is gitignored. Use it for machine-specific overrides — for example, if you install `.command-gate/` at a shared location instead of the project root, or if you need to override the timeout:
+No local configuration is required. The committed `.claude/settings.json` is the complete working config.
 
-```json
-{
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Bash|PowerShell",
-        "hooks": [
-          {
-            "type": "command",
-            "shell": "powershell",
-            "command": "& 'D:\\shared\\.command-gate\\hooks\\gate_check.ps1'",
-            "timeout": 30
-          }
-        ]
-      }
-    ]
-  }
-}
-```
+`.claude/settings.local.json` is gitignored and exists only as an escape hatch. If you need to override the default hook paths — for example, because you moved `.command-gate/` to a shared location or need a longer timeout — create this file with your overrides. If you never create it, nothing breaks.
 
 ### Global configuration (alternative)
 
