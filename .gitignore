@@ -1,2 +1,10 @@
 investigations/
 .claude/settings.local.json
+
+# Runtime gate artifacts (generated during use, not shipped)
+.command-gate/pending/*.json
+.command-gate/inflight/*.json
+.command-gate/evidence/*.json
+.command-gate/evidence/*.txt
+.command-gate/blocked/*.json
+.command-gate/debug_payloads/*.json

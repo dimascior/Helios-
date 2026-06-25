@@ -15,6 +15,88 @@ Helios does not decide whether a command is "morally okay." It decides whether t
 
 Helios is not model-specific. Any model or agent can operate through it if it can write a valid `.gate.json` file and follow the gate lifecycle. The purpose is not only command safety. Helios also creates clean evidence boundaries for studying when an AI system is blocked, routed, or confused: command text, structured reasoning, command output, expected-vs-actual comparison, or next-command derivation.
 
+## Getting Started
+
+### Prerequisites
+
+- **Windows 10+** — PowerShell 5.1 is included. PowerShell Core (`pwsh`) also works.
+- **Claude Code** — installed and available in terminal (`claude` command).
+- **Git** — for cloning the repository.
+
+### Install
+
+```bash
+git clone https://github.com/dimascior/Helios-.git
+cd Helios-
+```
+
+The repository ships ready to use. No build step, no package install, no path configuration.
+
+```text
+Helios-/
+  .claude/settings.json              Hook wiring (relative paths, works on any machine)
+  .command-gate/
+    hooks/
+      gate_check.ps1                 PreToolUse validation
+      evidence_capture.ps1           PostToolUse evidence capture
+      tier_classifier.ps1            Risk tier classification
+    policy/
+      command-policy.json            Tier patterns, write indicators, exit-capture rules
+    templates/                       Gate templates (optional)
+    pending/                         Gates waiting to be consumed (empty on clone)
+    inflight/                        Gates currently executing (empty on clone)
+    evidence/                        Completed gates and sidecars (empty on clone)
+    blocked/                         Rejected command records (empty on clone)
+  README.md
+  LICENSE
+```
+
+### Activate
+
+Open the project in Claude Code:
+
+```bash
+cd Helios-
+claude
+```
+
+Claude Code reads `.claude/settings.json` on startup and registers the hooks automatically. No manual hook configuration is needed. The hooks use relative paths (`Join-Path $PWD`) and the scripts derive their own root from `$PSScriptRoot`, so nothing is hardcoded to a specific machine.
+
+### Verify
+
+Run any shell command. If Helios is active, the PreToolUse hook blocks it and reports what is needed:
+
+```text
+GATE REQUIRED: No valid gate found in pending/ for this command.
+Tier: 0. SHA256: 9f2b...c4a1. Category: routine.
+```
+
+This confirms the gate system is working. The agent must now write a `.gate.json` file in `pending/` with the reported SHA-256 and retry the command.
+
+### Add Helios to an existing project
+
+Copy two things into your project root:
+
+1. `.command-gate/` — the entire directory (hooks, policy, and empty runtime directories)
+2. `.claude/settings.json` — the hook wiring
+
+```bash
+cp -r Helios-/.command-gate /path/to/your/project/
+cp -r Helios-/.claude /path/to/your/project/
+```
+
+The hooks activate the next time Claude Code opens that project. Add the runtime directories to your project's `.gitignore`:
+
+```gitignore
+.command-gate/pending/*.json
+.command-gate/inflight/*.json
+.command-gate/evidence/*.json
+.command-gate/evidence/*.txt
+.command-gate/blocked/*.json
+.command-gate/debug_payloads/*.json
+.claude/settings.local.json
+```
+
 ## Design Principles
 
 ### The hash is not the trust boundary
@@ -607,83 +689,26 @@ That separation helps identify whether a model is being routed or blocked becaus
 
 For guardrail localization, do not give the tested model the full operator playbook at first. Feed one controlled lane at a time so the trigger can be isolated.
 
-## Setup
+## Configuration Details
 
-### No path editing required
+### How paths resolve
 
-The hook scripts derive `$GateRoot` from their own filesystem location using `Split-Path $PSScriptRoot -Parent`. This means `$GateRoot` always resolves to the `.command-gate/` directory that contains the `hooks/` folder, regardless of where the project is cloned. No hardcoded paths exist in the hook scripts.
+No hardcoded paths exist anywhere in Helios.
 
-### Project-level configuration (committed)
+- **Hook scripts** derive `$GateRoot` from their own filesystem location using `Split-Path $PSScriptRoot -Parent`. This always resolves to the `.command-gate/` directory containing `hooks/`, regardless of where the project is cloned.
+- **`.claude/settings.json`** uses `Join-Path $PWD` to build hook command paths at runtime. Claude Code sets `$PWD` to the project root when hooks fire.
 
-This repository ships `.claude/settings.json` with hook wiring that uses relative paths via `Join-Path $PWD`. When Claude Code opens a project, it reads this file automatically. Anyone who clones the repo gets working hooks with no manual setup.
+### Local overrides (optional)
 
-```json
-{
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Bash|PowerShell",
-        "hooks": [
-          {
-            "type": "command",
-            "shell": "powershell",
-            "command": "& (Join-Path $PWD '.command-gate\\hooks\\gate_check.ps1')",
-            "timeout": 15
-          }
-        ]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "matcher": "Bash|PowerShell",
-        "hooks": [
-          {
-            "type": "command",
-            "shell": "powershell",
-            "command": "& (Join-Path $PWD '.command-gate\\hooks\\evidence_capture.ps1')",
-            "timeout": 15
-          }
-        ]
-      }
-    ],
-    "PostToolUseFailure": [
-      {
-        "matcher": "Bash|PowerShell",
-        "hooks": [
-          {
-            "type": "command",
-            "shell": "powershell",
-            "command": "& (Join-Path $PWD '.command-gate\\hooks\\evidence_capture.ps1')",
-            "timeout": 15
-          }
-        ]
-      }
-    ]
-  }
-}
-```
+`.claude/settings.local.json` is gitignored. No local configuration is required — the committed config is complete. Use `settings.local.json` only if you need to override paths (e.g., shared `.command-gate/` location) or change the hook timeout.
 
-### Local overrides (optional, not committed)
+### Global hooks (alternative)
 
-No local configuration is required. The committed `.claude/settings.json` is the complete working config.
+If you prefer hooks to apply to every Claude Code session rather than per-project, add the hook configuration to `~/.claude/settings.json` with absolute paths to the scripts.
 
-`.claude/settings.local.json` is gitignored and exists only as an escape hatch. If you need to override the default hook paths — for example, because you moved `.command-gate/` to a shared location or need a longer timeout — create this file with your overrides. If you never create it, nothing breaks.
+### Verifying the hook payload
 
-### Global configuration (alternative)
-
-If you prefer to wire hooks globally instead of per-project, add the configuration to `~/.claude/settings.json` with absolute paths. Global hooks apply to every Claude Code session, not just this project.
-
-### Verifying the installation
-
-Use `debug_hook.ps1` first when installing Helios in a new Claude Code environment. Confirm the actual payload contains:
-
-- `tool_name`
-- `tool_input.command`
-- `cwd`
-- `tool_use_id`
-- `tool_response.stdout` and `tool_response.stderr` for `PostToolUse`
-
-Create gate files in `pending/` before issuing commands. The agent discovers the required SHA-256 by attempting the command, reading the hash from the block message, and writing a gate that matches.
+To confirm Claude Code is delivering the expected payload structure to the hooks, inspect the `debug_payloads/` directory after running a command. The PreToolUse payload should contain `tool_name`, `tool_input.command`, `cwd`, and `tool_use_id`. The PostToolUse payload should additionally contain `tool_response.stdout` and `tool_response.stderr`.
 
 ## Validation Checklist
 
