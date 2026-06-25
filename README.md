@@ -267,7 +267,9 @@ Exit-capture suffixes and wrapper scaffolding are handled by policy. If your com
 
 ## Diagnostics
 
-Helios should not make the agent guess why a gate failed.
+The PreToolUse hook does not return a binary pass/fail. When it blocks a command, it returns structured context explaining exactly why the gate was rejected — which field was wrong, what the expected value was, what the actual value was, and what is still missing. The agent receives this context as part of the hook response and can use it to correct the gate and retry without guessing.
+
+This is a deliberate design choice. A simple exit code 0 or 1 would force the agent into blind retry loops or require a human to diagnose every rejection. Instead, the hook acts as a validation report: it tells the agent what to fix, not just that something failed.
 
 If no plausible gate exists, the hook reports:
 
