@@ -4,7 +4,7 @@
 
 $ErrorActionPreference = 'Stop'
 
-$GateRoot = 'C:\Users\dimas\Desktop\MythosJustAFable\.command-gate'
+$GateRoot = Split-Path $PSScriptRoot -Parent
 
 . (Join-Path $GateRoot 'hooks\tier_classifier.ps1')
 

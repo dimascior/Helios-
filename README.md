@@ -73,6 +73,275 @@ The agent can discover the hash by first attempting the command without a gate, 
 
 Gates that cannot be matched to an inflight record are logged as orphans with a generated correlation ID.
 
+## Lifecycle Examples by Tier
+
+### Tier 0 — Routine
+
+A simple directory check. Only base fields required.
+
+**1. Agent attempts command without a gate:**
+
+```text
+> pwd; echo EXIT=$?
+```
+
+**2. PreToolUse blocks and reports the SHA-256:**
+
+```text
+GATE REQUIRED: No valid gate found in pending/ for this command.
+Tier: 0. SHA256: 9f2b...c4a1. Category: routine.
+```
+
+**3. Agent writes gate file** `pending/pwd-check.gate.json`:
+
+```json
+{
+  "schema_version": "command-gate.v1",
+  "correlation_id": "pwd-check",
+  "created_utc": "2026-06-25T12:00:00Z",
+  "expires_utc": "2026-06-26T12:00:00Z",
+  "command": "pwd; echo EXIT=$?",
+  "command_sha256": "9f2b...c4a1",
+  "working_directory": "C:\\Users\\you\\project",
+  "shell": "bash",
+  "risk_tier": 0,
+  "exit_capture": "suffix",
+  "multi_command": true,
+  "segments": ["pwd", "echo EXIT=$?"],
+  "need": "Verify the current working directory before writing the next gate.",
+  "expected": "The output should show the project path and end with EXIT=0.",
+  "actual_means": "If the path matches and EXIT=0, the cwd baseline is valid.",
+  "next_logic": "Use the observed cwd as working_directory for the next gate.",
+  "approval_boundary": "This gate makes the command eligible for permission flow only; it does not auto-approve execution."
+}
+```
+
+**4. Agent retries. PreToolUse validates and returns `{}`** — command proceeds to Claude Code's normal permission flow.
+
+Gate moves: `pending/pwd-check.gate.json` → `inflight/<tool_use_id>_pwd-check.gate.json`
+
+**5. Command executes:**
+
+```text
+/c/Users/you/project
+EXIT=0
+```
+
+**6. PostToolUse captures evidence.** Gate moves to `evidence/` with sidecars:
+
+```text
+evidence/
+  <tool_use_id>_pwd-check.gate.json        # consumed gate
+  <tool_use_id>_pwd-check.result.json       # exit code, timing, match status
+  <tool_use_id>_pwd-check.stdout.txt        # raw stdout
+```
+
+**7. Evidence hook injects context** into the agent's next turn:
+
+```text
+[EVIDENCE:pwd-check] Command succeeded. Compare EXPECTED from the gate vs ACTUAL output before creating the next gate.
+```
+
+---
+
+### Tier 1 — Diagnostic
+
+System inspection. Same base fields as Tier 0 — no additional requirements.
+
+**1. Agent writes gate** `pending/list-processes.gate.json`:
+
+```json
+{
+  "schema_version": "command-gate.v1",
+  "correlation_id": "list-processes",
+  "created_utc": "2026-06-25T12:05:00Z",
+  "expires_utc": "2026-06-26T12:00:00Z",
+  "command": "Get-Process node -ErrorAction SilentlyContinue; Write-Host \"EXIT=$LASTEXITCODE\"",
+  "command_sha256": "a3d1...e7b2",
+  "working_directory": "C:\\Users\\you\\project",
+  "shell": "powershell",
+  "risk_tier": 1,
+  "exit_capture": "suffix",
+  "multi_command": true,
+  "segments": [
+    "Get-Process node -ErrorAction SilentlyContinue",
+    "Write-Host \"EXIT=$LASTEXITCODE\""
+  ],
+  "need": "Check if a Node.js process is running before starting the dev server.",
+  "expected": "Either a process table showing node PIDs or empty output if none are running, followed by EXIT=0.",
+  "actual_means": "If node processes appear, the dev server may already be running. If empty, safe to start.",
+  "next_logic": "If no node process is running, create a gate to start the dev server.",
+  "approval_boundary": "This gate makes the command eligible for permission flow only; it does not auto-approve execution."
+}
+```
+
+**2. PreToolUse validates and returns `{}`.**
+
+**3. Command output:**
+
+```text
+ NPM(K)    PM(M)      WS(M)     CPU(s)      Id  SI ProcessName
+ ------    -----      -----     ------      --  -- -----------
+     18    45.12      52.30       2.14    7832   1 node
+EXIT=0
+```
+
+**4. Evidence captured.** The hook writes `.result.json` with the parsed `EXIT=0` and the full stdout.
+
+---
+
+### Tier 2 — Remote / Admin
+
+Remote access commands. Requires `stop_conditions` in addition to base fields.
+
+**1. Agent writes gate** `pending/ssh-uptime.gate.json`:
+
+```json
+{
+  "schema_version": "command-gate.v1",
+  "correlation_id": "ssh-uptime",
+  "created_utc": "2026-06-25T12:10:00Z",
+  "expires_utc": "2026-06-26T12:00:00Z",
+  "command": "ssh deploy@staging.example.com 'uptime'; echo EXIT=$?",
+  "command_sha256": "c8f4...19d3",
+  "working_directory": "C:\\Users\\you\\project",
+  "shell": "bash",
+  "risk_tier": 2,
+  "exit_capture": "suffix",
+  "multi_command": true,
+  "segments": [
+    "ssh deploy@staging.example.com 'uptime'",
+    "echo EXIT=$?"
+  ],
+  "need": "Verify staging server is reachable and check load before deploying.",
+  "expected": "Uptime output showing the server is up with reasonable load averages, followed by EXIT=0.",
+  "actual_means": "If uptime returns and load is under 4.0, the server is healthy enough to deploy to.",
+  "next_logic": "If healthy, create a Tier 3 gate for the deploy command. If unreachable, stop and report.",
+  "stop_conditions": [
+    "Stop if SSH authentication fails or connection is refused.",
+    "Stop if load average exceeds 4.0 — the server is under too much load to deploy."
+  ],
+  "approval_boundary": "This gate makes the command eligible for permission flow only; it does not auto-approve execution."
+}
+```
+
+**2. PreToolUse validates.** If `stop_conditions` were missing:
+
+```text
+GATE REJECTED: closest gate ssh-uptime.gate.json matched sha256 but failed validation:
+- missing tier-required fields: stop_conditions
+```
+
+With `stop_conditions` present, returns `{}`.
+
+**3. Command output:**
+
+```text
+ 12:10:05 up 42 days,  3:15,  2 users,  load average: 0.45, 0.62, 0.58
+EXIT=0
+```
+
+**4. Evidence hook injects context:**
+
+```text
+[EVIDENCE:ssh-uptime] Command succeeded. Compare EXPECTED from the gate vs ACTUAL output before creating the next gate.
+```
+
+The agent reads the load averages, compares against the stop condition threshold, and decides whether to proceed.
+
+---
+
+### Tier 3 — Modifying
+
+State-changing commands. Requires `stop_conditions` and `read_write_impact` in addition to base fields.
+
+**1. Agent writes gate** `pending/push-main.gate.json`:
+
+```json
+{
+  "schema_version": "command-gate.v1",
+  "correlation_id": "push-main",
+  "created_utc": "2026-06-25T12:15:00Z",
+  "expires_utc": "2026-06-26T12:00:00Z",
+  "command": "git push origin main; echo EXIT=$?",
+  "command_sha256": "d2a7...f103",
+  "working_directory": "C:\\Users\\you\\project",
+  "shell": "bash",
+  "risk_tier": 3,
+  "exit_capture": "suffix",
+  "multi_command": true,
+  "segments": [
+    "git push origin main",
+    "echo EXIT=$?"
+  ],
+  "need": "Push the committed README update to the remote repository.",
+  "expected": "Push output showing objects written and refs updated on origin/main, followed by EXIT=0.",
+  "actual_means": "If push succeeds, the changes are live on the remote. If rejected, a pull or rebase is needed first.",
+  "next_logic": "If push succeeds, report completion. If rejected as non-fast-forward, create a gate for git pull --rebase.",
+  "stop_conditions": [
+    "Stop if authentication fails.",
+    "Stop if push is rejected as non-fast-forward — do not force push without explicit authorization."
+  ],
+  "read_write_impact": {
+    "reads": ["local main branch history"],
+    "writes": ["origin/main ref on remote repository"]
+  },
+  "approval_boundary": "This gate makes the command eligible for permission flow only; it does not auto-approve execution."
+}
+```
+
+**2. PreToolUse validates.** If `read_write_impact` were missing or had `writes: ["none"]`:
+
+```text
+GATE REJECTED: closest gate push-main.gate.json matched sha256 but failed validation:
+- write indicator detected but read_write_impact.writes is missing
+```
+
+With all fields present, returns `{}`.
+
+**3. Command output:**
+
+```text
+Enumerating objects: 5, done.
+Counting objects: 100% (5/5), done.
+Writing objects: 100% (3/3), 722 bytes | 722.00 KiB/s, done.
+To https://github.com/you/project.git
+   a31f125..5a43d10  main -> main
+EXIT=0
+```
+
+**4. Evidence sidecars:**
+
+```text
+evidence/
+  <tool_use_id>_push-main.gate.json
+  <tool_use_id>_push-main.result.json
+  <tool_use_id>_push-main.tool_response.json   # full Claude Code tool response (capped 1MB)
+  <tool_use_id>_push-main.stdout.txt
+  <tool_use_id>_push-main.stderr.txt            # git progress output
+```
+
+---
+
+### Tier 4 — Forbidden
+
+Always blocked. No gate can authorize a Tier 4 command.
+
+**1. Agent attempts command:**
+
+```text
+> rm -rf /
+```
+
+**2. PreToolUse blocks unconditionally:**
+
+```text
+TIER 4 BLOCKED: Command matches forbidden pattern. Category: destructive disk command.
+No gate can authorize this command.
+```
+
+The block fires before gate matching. Even if a gate exists in `pending/` with a correct SHA-256, Tier 4 commands never reach the validation stage. The attempt is written to `blocked/` for audit.
+
 ## Directory Structure
 
 ```text
@@ -340,9 +609,9 @@ For guardrail localization, do not give the tested model the full operator playb
 
 ## Setup
 
-Place `.command-gate/` in the project root or update `$GateRoot` inside the hook scripts to the intended absolute directory.
+Place `.command-gate/` in the project root. The hook scripts derive `$GateRoot` automatically from their own location (`Split-Path $PSScriptRoot -Parent`), so no path editing is needed — just update the hook command paths in `settings.json` to point to your copy.
 
-Configure Claude Code hooks in `~/.claude/settings.json`:
+Configure Claude Code hooks in `~/.claude/settings.json`, replacing `<project>` with the absolute path to your project root:
 
 ```json
 {
@@ -354,7 +623,7 @@ Configure Claude Code hooks in `~/.claude/settings.json`:
           {
             "type": "command",
             "shell": "powershell",
-            "command": "& 'C:\\Users\\dimas\\Desktop\\Engineering\\.command-gate\\hooks\\gate_check.ps1'",
+            "command": "& '<project>\\.command-gate\\hooks\\gate_check.ps1'",
             "timeout": 15
           }
         ]
@@ -367,7 +636,7 @@ Configure Claude Code hooks in `~/.claude/settings.json`:
           {
             "type": "command",
             "shell": "powershell",
-            "command": "& 'C:\\Users\\dimas\\Desktop\\Engineering\\.command-gate\\hooks\\evidence_capture.ps1'",
+            "command": "& '<project>\\.command-gate\\hooks\\evidence_capture.ps1'",
             "timeout": 15
           }
         ]
@@ -380,7 +649,7 @@ Configure Claude Code hooks in `~/.claude/settings.json`:
           {
             "type": "command",
             "shell": "powershell",
-            "command": "& 'C:\\Users\\dimas\\Desktop\\Engineering\\.command-gate\\hooks\\evidence_capture.ps1'",
+            "command": "& '<project>\\.command-gate\\hooks\\evidence_capture.ps1'",
             "timeout": 15
           }
         ]

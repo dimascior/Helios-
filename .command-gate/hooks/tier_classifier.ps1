@@ -2,7 +2,7 @@
 # Exports: Get-CommandTier, Test-ChainViolation, Test-WriteIndicator
 # Loads all patterns from command-policy.json at runtime.
 
-$script:GateRoot = 'C:\Users\dimas\Desktop\MythosJustAFable\.command-gate'
+$script:GateRoot = Split-Path $PSScriptRoot -Parent
 $script:PolicyLoaded = $false
 $script:Tier4Patterns = @()
 $script:Tier3Patterns = @()

@@ -4,7 +4,7 @@
 
 $ErrorActionPreference = 'SilentlyContinue'
 
-$GateRoot = 'C:\Users\dimas\Desktop\MythosJustAFable\.command-gate'
+$GateRoot = Split-Path $PSScriptRoot -Parent
 
 function Get-Sha256 {
     param([string]$Text)
