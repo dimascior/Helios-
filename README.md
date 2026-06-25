@@ -15,6 +15,10 @@ Helios does not decide whether a command is "morally okay." It decides whether t
 
 Helios is not model-specific. Any model or agent can operate through it if it can write a valid `.gate.json` file and follow the gate lifecycle. The purpose is not only command safety. Helios also creates clean evidence boundaries for studying when an AI system is blocked, routed, or confused: command text, structured reasoning, command output, expected-vs-actual comparison, or next-command derivation.
 
+<p align="center">
+  <img src="helios-demo.gif" alt="Helios Command-Gate System in action" width="800" />
+</p>
+
 ## Getting Started
 
 ### Prerequisites
