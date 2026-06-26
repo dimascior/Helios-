@@ -462,7 +462,7 @@ If an `operating-catalog.json` exists in `templates/`, the classifier checks it 
 |------|----------|----------|-------------------------|
 | 0 | Routine | unlisted commands | base gate fields |
 | 1 | Diagnostic | `ps`, `ls`, `cat`, `grep`, `Get-Process` | base gate fields |
-| 2 | Remote/Admin | `ssh`, `sudo`, `tailscale ssh`, selected `rv` actions | `stop_conditions` |
+| 2 | Remote/Admin | `ssh`, `sudo`, `tailscale ssh` | `stop_conditions` |
 | 3 | Modifying | `rm`, `git push`, `npm install`, `Set-Content`, `mkdir` | `stop_conditions`, `read_write_impact` |
 | 4 | Forbidden | destructive disk commands, credential dumping, unsafe pipe-to-shell patterns | always blocked |
 
