@@ -8,7 +8,7 @@ Helios is a command-gate policy layer for Claude Code and other AI agent tool ex
 
 It turns shell execution into an explicit, auditable protocol. Before an agent can run a `Bash` or `PowerShell` command, it must create a matching single-use gate file that explains what the command is, why it is needed, what output is expected, how the result should be interpreted, and what decision the result supports.
 
-Each command an LLM wants to execute on your system must go through a JSON gate file with a valid pre-execution command hash. The agent makes the request by filling out the gate schema parameters and running the command. Once the hash validates against the declared scope and schema, the gate returns context for that one-off command and surfaces any errors found during pre-execution validation. The gate binds the command to declared intent, forcing the agent to explain:
+Each command an LLM wants to execute must go through a JSON gate file with a valid pre-execution command hash. The agent makes the request by filling out the gate schema parameters and running the command. Once the hash validates against the declared scope and schema, the gate returns context for that one-off command and surfaces any errors found during pre-execution validation. The gate binds the command to declared intent, forcing the agent to explain:
 
 - **why** the command is needed
 - **what** the expected output is
