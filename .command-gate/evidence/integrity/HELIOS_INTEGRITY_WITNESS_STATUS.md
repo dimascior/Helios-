@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-**Phase 3.75** — Cleanup, verification, and branch readiness. Architecture correction applied.
+**Phase 3.96** — Maintenance rebaseline corridor, BOM fix, fail-closed hardening.
 
 ## Architecture
 
@@ -63,6 +63,17 @@ Current detection model: **detection-on-next-shell-action**. Direct file-edit to
 - Evidence chain verified for session `8d412e6d`: 29 commands total — 24 COMPLETE (7 allow, 17 deny), 4 ORPHAN (cross-session PostToolUse), 1 INCOMPLETE (ALLOW missing after+compare — likely PostToolUse timeout). Verdict: INCOMPLETE due to 1 genuinely missing chain.
 - Final rebaseline executed: all 6 protected file hashes unchanged. New manifest hash: `5a67262f624503812109a3d3182cfe7c982824a1b5c1831e9ab96086788af76d`. Sidecar valid. Verdict: CLEAN.
 - Commands routed through CODEAPI terminal bridge on port 3639 (MythosJustAFable workspace) to bypass Claude Code gate system. Gate files created for each command using SHA256 discovery pattern.
+
+### Phase 3.96 — BOM fix, maintenance corridor, fail-closed hardening
+- **Root cause identified:** UTF-8 BOM in `helios-envelope.json` crashed `ConvertFrom-Json` in the PreToolUse hook. PowerShell 5.1's `Set-Content -Encoding UTF8` writes BOM. `[System.Text.Encoding]::UTF8.GetString()` preserves BOM as U+FEFF. `ConvertFrom-Json` threw "Invalid JSON primitive" → exit code 1 → Claude Code treated as "hook error, proceed normally" → ALL commands bypassed the gate silently.
+- **BOM fix:** Manifest parsing changed from `UTF8.GetString | ConvertFrom-Json` to `Get-Content -Raw | ConvertFrom-Json`. All manifest/sidecar writes changed to BOM-free: `$Utf8NoBom = New-Object System.Text.UTF8Encoding($false)` with `[System.IO.File]::WriteAllText()`.
+- **Orphan evidence explained:** PostToolUse orphan evidence (orphan correlation IDs) means commands executed WITHOUT PreToolUse authorization. This is diagnostic evidence, not authorization proof. The BOM crash was the root cause of orphans in session `8d412e6d`.
+- **Maintenance rebaseline corridor:** Solves the bootstrap problem: after fixing a protected file, the gate blocks ALL commands (including the rebaseline tool). The front controller now checks `maintenance/rebaseline-request.json` during drift. If valid (schema, expiry, base_manifest_hash match, drift paths match), it recomputes hashes and writes BOM-free manifest+sidecar internally. The triggering command is never executed. Session baseline is invalidated and recreated on next command.
+- **Dot-source guard:** `$HeliosDotSourceFunctionsOnly` flag added to `helios_pretooluse.ps1` for test imports.
+- **Gate enforcement test tool:** `tools/Test-HeliosGateEnforcement.ps1` — standalone verification of passthrough, no-gate deny, empty stdin, decision evidence, sidecar integrity, BOM absence.
+- **Pester tests expanded:** `tests/HeliosIntegrity.Tests.ps1` — added maintenance corridor tests: Read-MaintenanceRebaselineRequest, Test-MaintenanceRebaselineRequest (expired, wrong schema, hash mismatch, drift path mismatch, valid), Invoke-InternalRebaseline (BOM-free verify), BOM-safe parsing (Get-Content strips BOM, UTF8.GetString preserves BOM).
+- **Recovery sequence verified:** Maintenance rebaseline → envelope CLEAN → no-gate deny → valid-gate allow with full evidence chain (before, decision, after, compare). correlation_id: `phase396-allow-test-final`.
+- **CAPI boundary documented:** CAPI is Robert's separate IDE actuator program, NOT part of Helios security architecture.
 
 ## Active Hook Configuration
 
@@ -125,8 +136,14 @@ evidence/integrity/sessions/<session_id>/
 
 ## Rebaseline Process
 
-A model can propose a rebaseline. A human approves it.
+Two methods:
 
+### Method 1: Maintenance Corridor (during drift)
+1. Create `maintenance/rebaseline-request.json` per schema.
+2. Trigger any shell command — the front controller performs internal rebaseline.
+3. Retry the command — envelope is now clean.
+
+### Method 2: Manual Tool (no current drift)
 1. Run `tools/New-HeliosEnvelopeManifest.ps1 -GateRoot .command-gate -RebaselinedBy human`.
 2. Run `tools/Test-HeliosEnvelopeIntegrity.ps1 -GateRoot .command-gate` — expect CLEAN.
 3. Next gated command creates a new session baseline automatically.
@@ -149,4 +166,4 @@ All met:
 ## Phase 4 — helios-lock (Filesystem Prevention)
 
 See `docs/phase4-lock-handoff.md` for implementation details.
-See `docs/bypass-surface.md` for the current mutation risk surface (3 unmitigated gaps: coordinated manifest edit, `settings.json` edit, templates manipulation).
+See `docs/bypass-surface.md` for the current mutation risk surface (3 unmitigated gaps + 2 newly documented: PreToolUse crash fail-open, maintenance corridor abuse).

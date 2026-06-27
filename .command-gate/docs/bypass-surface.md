@@ -117,6 +117,44 @@ Current mutation risks for the Helios command-gate system, organized by attack v
 | Stale inflight | — | — | Cleanup tool |
 | Templates manipulation | **Gap** (not in manifest) | — | Prevents |
 
+### 10. PreToolUse hook crash (fail-open)
+
+| Detail | |
+|---|---|
+| **Target** | `helios_pretooluse.ps1` (any crash path) |
+| **Via** | BOM in manifest, malformed JSON, uncaught exception |
+| **Detected by** | PostToolUse orphan evidence (orphan correlation IDs) |
+| **Detection timing** | After execution (PostToolUse) — command already ran |
+| **Prevented by** | BOM-safe parsing (Phase 3.96 fix), fail-closed error handling |
+| **Risk** | Claude Code treats non-zero exit from PreToolUse as "hook error, proceed normally." A crash silently allows ALL commands. The BOM crash (Phase 3.96 root cause) produced orphan evidence but no PreToolUse denials. |
+
+### 11. Maintenance corridor abuse
+
+| Detail | |
+|---|---|
+| **Target** | `maintenance/rebaseline-request.json` |
+| **Via** | Write tool (create request during drift) |
+| **Detected by** | Front controller validates request: schema_version, write_mode, base_manifest_hash vs sidecar, expected_drift_paths exact match, expiry |
+| **Detection timing** | At validation time (PreToolUse) |
+| **Prevented by** | Validation logic: request must name the exact drifted files and match the current sidecar hash |
+| **Risk** | An attacker who controls the drift AND the maintenance request could authorize their own rebaseline. Mitigated by: (a) the request must specify the exact drifted paths, (b) base_manifest_hash must match the sidecar at request creation time, (c) human authorization is required to create the request. Phase 4 helios-lock would prevent unauthorized writes to `maintenance/`. |
+
+## Layer Responsibility Summary
+
+| Risk | TCE Witness | Helios Gate | helios-lock (Phase 4) |
+|---|---|---|---|
+| Hook file edit (Edit/Write) | Detects on next shell | — | Prevents |
+| Hook file edit (shell) | Detects on next shell | Blocks if no gate | Prevents |
+| Policy edit (Edit/Write) | Detects on next shell | — | Prevents |
+| Manifest+sidecar coordinated edit | **Gap** | — | Prevents |
+| settings.json edit | **Gap** | — | Prevents |
+| Fabricated gate file | — | Validates schema/hash | — |
+| Baseline tampering | Durable manifest catches primary drift | — | Could lock after creation |
+| Stale inflight | — | — | Cleanup tool |
+| Templates manipulation | **Gap** (not in manifest) | — | Prevents |
+| PreToolUse crash (fail-open) | Orphan evidence diagnostic | — | — |
+| Maintenance corridor abuse | Validates request fields | — | Prevents writes to maintenance/ |
+
 ## Cleanup and Archive Requirements
 
 - Stale pending gates: archive to `evidence/stale/` via `Move-HeliosStaleGateArtifacts.ps1`.

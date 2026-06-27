@@ -238,6 +238,233 @@ Describe "Helios Integrity Bridge" {
     }
 }
 
+Describe "Helios Maintenance Corridor" {
+
+    BeforeAll {
+        $script:GateRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
+        $script:HookPath = Join-Path $script:GateRoot '.command-gate\hooks\helios_pretooluse.ps1'
+
+        $script:MaintRoot = Join-Path ([System.IO.Path]::GetTempPath()) "helios-maint-test-$([guid]::NewGuid().ToString('N').Substring(0,8))"
+        foreach ($dir in @('hooks', 'hooks\lib', 'policy', 'manifest', 'pending', 'inflight', 'evidence', 'evidence\maintenance', 'evidence\integrity', 'blocked', 'maintenance', 'templates')) {
+            New-Item -ItemType Directory -Path (Join-Path $script:MaintRoot $dir) -Force | Out-Null
+        }
+
+        $script:TestFiles = @{
+            'hooks/gate_check.ps1'                = 'gc content for maint test'
+            'hooks/tier_classifier.ps1'           = 'tc content for maint test'
+            'hooks/helios_pretooluse.ps1'         = 'hp content for maint test'
+            'hooks/evidence_capture.ps1'          = 'ec content for maint test'
+            'hooks/lib/HeliosIntegrityBridge.ps1' = 'bridge content for maint test'
+            'policy/command-policy.json'           = '{"schema_version":"command-policy.v1"}'
+        }
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        $script:FileHashes = @{}
+        $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+        foreach ($relPath in $script:TestFiles.Keys) {
+            $fullPath = Join-Path $script:MaintRoot ($relPath -replace '/', '\')
+            [System.IO.File]::WriteAllText($fullPath, $script:TestFiles[$relPath], $Utf8NoBom)
+            $bytes = [System.IO.File]::ReadAllBytes($fullPath)
+            $hash = ($sha.ComputeHash($bytes) | ForEach-Object { $_.ToString('x2') }) -join ''
+            $script:FileHashes[$relPath] = $hash
+        }
+
+        $manifest = [ordered]@{
+            schema_version = 'helios-envelope.v1'
+            created_utc    = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+            rebaselined_by = 'test'
+            protected      = [ordered]@{
+                description = 'Must not change during gated execution'
+                paths       = @('hooks/gate_check.ps1','hooks/evidence_capture.ps1','hooks/tier_classifier.ps1','hooks/helios_pretooluse.ps1','hooks/lib/HeliosIntegrityBridge.ps1','policy/command-policy.json','manifest/helios-envelope.json','manifest/helios-envelope.sha256')
+                hashes      = [ordered]@{}
+            }
+            mutable        = [ordered]@{
+                description = 'Must change as part of gate lifecycle'
+                dirs        = @('pending/','inflight/','evidence/','blocked/')
+            }
+        }
+        foreach ($relPath in ($script:FileHashes.Keys | Sort-Object)) {
+            $manifest.protected.hashes[$relPath] = $script:FileHashes[$relPath]
+        }
+        $mPath = Join-Path $script:MaintRoot 'manifest\helios-envelope.json'
+        $mJson = $manifest | ConvertTo-Json -Depth 5
+        [System.IO.File]::WriteAllText($mPath, $mJson, $Utf8NoBom)
+        $mBytes = [System.IO.File]::ReadAllBytes($mPath)
+        $script:ManifestHash = ($sha.ComputeHash($mBytes) | ForEach-Object { $_.ToString('x2') }) -join ''
+        $sPath = Join-Path $script:MaintRoot 'manifest\helios-envelope.sha256'
+        [System.IO.File]::WriteAllText($sPath, $script:ManifestHash, $Utf8NoBom)
+
+        $HeliosDotSourceFunctionsOnly = $true
+        . (Join-Path $script:GateRoot '.command-gate\hooks\helios_pretooluse.ps1')
+    }
+
+    AfterAll {
+        if ($script:MaintRoot -and (Test-Path $script:MaintRoot)) {
+            Remove-Item -Recurse -Force $script:MaintRoot -ErrorAction SilentlyContinue
+        }
+    }
+
+    Context "Read-MaintenanceRebaselineRequest" {
+        It "returns null when no request exists" {
+            $result = Read-MaintenanceRebaselineRequest -Root $script:MaintRoot
+            $result | Should -BeNullOrEmpty
+        }
+
+        It "reads valid request file" {
+            $reqPath = Join-Path $script:MaintRoot 'maintenance\rebaseline-request.json'
+            $req = @{
+                schema_version       = 'helios-maintenance-rebaseline.v1'
+                request_id           = 'test-req-001'
+                created_utc          = (Get-Date).ToUniversalTime().ToString('o')
+                expires_utc          = (Get-Date).AddHours(2).ToUniversalTime().ToString('o')
+                requested_by         = 'test'
+                base_manifest_hash   = $script:ManifestHash
+                expected_drift_paths = @('hooks/helios_pretooluse.ps1')
+                reason               = 'test reason'
+                write_mode           = 'front_controller_internal_rebaseline'
+            }
+            $req | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $reqPath -Encoding UTF8
+            try {
+                $result = Read-MaintenanceRebaselineRequest -Root $script:MaintRoot
+                $result | Should -Not -BeNullOrEmpty
+                $result.request.schema_version | Should -Be 'helios-maintenance-rebaseline.v1'
+                $result.path | Should -Be $reqPath
+            } finally {
+                Remove-Item $reqPath -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+
+    Context "Test-MaintenanceRebaselineRequest" {
+        It "rejects expired request" {
+            $req = @{
+                request = @{
+                    schema_version       = 'helios-maintenance-rebaseline.v1'
+                    write_mode           = 'front_controller_internal_rebaseline'
+                    expires_utc          = '2020-01-01T00:00:00Z'
+                    base_manifest_hash   = $script:ManifestHash
+                    expected_drift_paths = @('hooks/helios_pretooluse.ps1')
+                }
+            }
+            $result = Test-MaintenanceRebaselineRequest -Request $req -SidecarHash $script:ManifestHash `
+                -ActualDriftPaths @('hooks/helios_pretooluse.ps1') -MHashes $script:FileHashes
+            $result.valid | Should -Be $false
+            $result.reason | Should -Match 'expired'
+        }
+
+        It "rejects wrong schema_version" {
+            $req = @{
+                request = @{
+                    schema_version       = 'wrong-version'
+                    write_mode           = 'front_controller_internal_rebaseline'
+                    expires_utc          = (Get-Date).AddHours(2).ToUniversalTime().ToString('o')
+                    base_manifest_hash   = $script:ManifestHash
+                    expected_drift_paths = @('hooks/helios_pretooluse.ps1')
+                }
+            }
+            $result = Test-MaintenanceRebaselineRequest -Request $req -SidecarHash $script:ManifestHash `
+                -ActualDriftPaths @('hooks/helios_pretooluse.ps1') -MHashes $script:FileHashes
+            $result.valid | Should -Be $false
+            $result.reason | Should -Match 'schema_version'
+        }
+
+        It "rejects base_manifest_hash mismatch" {
+            $req = @{
+                request = @{
+                    schema_version       = 'helios-maintenance-rebaseline.v1'
+                    write_mode           = 'front_controller_internal_rebaseline'
+                    expires_utc          = (Get-Date).AddHours(2).ToUniversalTime().ToString('o')
+                    base_manifest_hash   = '0' * 64
+                    expected_drift_paths = @('hooks/helios_pretooluse.ps1')
+                }
+            }
+            $result = Test-MaintenanceRebaselineRequest -Request $req -SidecarHash $script:ManifestHash `
+                -ActualDriftPaths @('hooks/helios_pretooluse.ps1') -MHashes $script:FileHashes
+            $result.valid | Should -Be $false
+            $result.reason | Should -Match 'base_manifest_hash mismatch'
+        }
+
+        It "rejects drift path mismatch" {
+            $req = @{
+                request = @{
+                    schema_version       = 'helios-maintenance-rebaseline.v1'
+                    write_mode           = 'front_controller_internal_rebaseline'
+                    expires_utc          = (Get-Date).AddHours(2).ToUniversalTime().ToString('o')
+                    base_manifest_hash   = $script:ManifestHash
+                    expected_drift_paths = @('hooks/gate_check.ps1')
+                }
+            }
+            $result = Test-MaintenanceRebaselineRequest -Request $req -SidecarHash $script:ManifestHash `
+                -ActualDriftPaths @('hooks/helios_pretooluse.ps1') -MHashes $script:FileHashes
+            $result.valid | Should -Be $false
+            $result.reason | Should -Match 'mismatch'
+        }
+
+        It "accepts valid request with matching drift" {
+            $req = @{
+                request = @{
+                    schema_version       = 'helios-maintenance-rebaseline.v1'
+                    write_mode           = 'front_controller_internal_rebaseline'
+                    expires_utc          = (Get-Date).AddHours(2).ToUniversalTime().ToString('o')
+                    base_manifest_hash   = $script:ManifestHash
+                    expected_drift_paths = @('hooks/helios_pretooluse.ps1')
+                }
+            }
+            $result = Test-MaintenanceRebaselineRequest -Request $req -SidecarHash $script:ManifestHash `
+                -ActualDriftPaths @('hooks/helios_pretooluse.ps1') -MHashes $script:FileHashes
+            $result.valid | Should -Be $true
+        }
+    }
+
+    Context "Invoke-InternalRebaseline" {
+        It "recomputes hashes and writes BOM-free manifest" {
+            $targetPath = Join-Path $script:MaintRoot 'hooks\helios_pretooluse.ps1'
+            [System.IO.File]::WriteAllText($targetPath, 'modified content', (New-Object System.Text.UTF8Encoding($false)))
+
+            $req = @{
+                request = @{
+                    requested_by = 'test-rebaseline'
+                    reason       = 'test rebaseline'
+                }
+            }
+            $result = Invoke-InternalRebaseline -Root $script:MaintRoot -Request $req -MHashes $script:FileHashes
+
+            $result.new_manifest_hash | Should -Match '^[0-9a-f]{64}$'
+            $result.updated_hashes.Count | Should -Be $script:FileHashes.Count
+
+            $mBytes = [System.IO.File]::ReadAllBytes((Join-Path $script:MaintRoot 'manifest\helios-envelope.json'))
+            $mBytes[0] | Should -Not -Be 239
+            $mBytes[1] | Should -Not -Be 187
+
+            $sContent = [System.IO.File]::ReadAllText((Join-Path $script:MaintRoot 'manifest\helios-envelope.sha256'))
+            $sContent | Should -Be $result.new_manifest_hash
+
+            [System.IO.File]::WriteAllText($targetPath, $script:TestFiles['hooks/helios_pretooluse.ps1'], (New-Object System.Text.UTF8Encoding($false)))
+        }
+    }
+
+    Context "BOM-safe manifest parsing" {
+        It "Get-Content -Raw strips BOM from manifest JSON" {
+            $testManifest = Join-Path ([System.IO.Path]::GetTempPath()) "bom-test-$([guid]::NewGuid().ToString('N').Substring(0,8)).json"
+            try {
+                $bomBytes = [byte[]](0xEF, 0xBB, 0xBF) + [System.Text.Encoding]::UTF8.GetBytes('{"test":"value"}')
+                [System.IO.File]::WriteAllBytes($testManifest, $bomBytes)
+
+                $parsed = Get-Content $testManifest -Raw | ConvertFrom-Json
+                $parsed.test | Should -Be 'value'
+            } finally {
+                Remove-Item $testManifest -Force -ErrorAction SilentlyContinue
+            }
+        }
+
+        It "UTF8.GetString preserves BOM and breaks ConvertFrom-Json" {
+            $bomBytes = [byte[]](0xEF, 0xBB, 0xBF) + [System.Text.Encoding]::UTF8.GetBytes('{"test":"value"}')
+            $rawString = [System.Text.Encoding]::UTF8.GetString($bomBytes)
+
+            { $rawString | ConvertFrom-Json } | Should -Throw
+        }
+    }
+}
+
 Describe "Helios Tools" {
 
     BeforeAll {

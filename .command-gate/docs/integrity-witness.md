@@ -158,14 +158,78 @@ Seven functions vendored from TCE lineage. Self-contained, no module imports. Po
 
 Hook stdout must contain only the final hook JSON response. All helper return values must be piped to `Out-Null` or captured in variables.
 
+## Maintenance Rebaseline Corridor
+
+When the front controller detects protected drift, it checks for a maintenance request at `maintenance/rebaseline-request.json`. This solves the bootstrap problem: the gate blocks all commands during drift, including the rebaseline tool.
+
+### Flow
+
+1. Front controller detects drift in protected files.
+2. Reads `maintenance/rebaseline-request.json` (if present).
+3. Validates: `schema_version`, `write_mode`, expiry, `base_manifest_hash` vs sidecar, drift paths exact match.
+4. If valid: recomputes all protected file hashes, writes BOM-free manifest+sidecar, writes evidence to `evidence/maintenance/`, moves the request to evidence, invalidates the session baseline.
+5. Denies with `MAINTENANCE_REBASELINE_COMPLETE` — the triggering command is never executed.
+6. Next command runs against the updated manifest and passes integrity checks.
+
+If the request is invalid or absent, standard `INTEGRITY_FAILURE` denial occurs.
+
+### Request Schema
+
+See `schemas/helios-maintenance-rebaseline.v1.schema.json`. Required fields:
+- `schema_version`: `"helios-maintenance-rebaseline.v1"`
+- `write_mode`: `"front_controller_internal_rebaseline"`
+- `base_manifest_hash`: must match current sidecar hash
+- `expected_drift_paths`: must exactly match actual drift
+- `expires_utc`: must be in the future
+- `requested_by`: who authorized the rebaseline
+
+### Evidence
+
+Maintenance evidence is written to `evidence/maintenance/`:
+- `<timestamp>-<request_id>.json` — rebaseline result with old/new hashes
+- `<timestamp>-<request_id>.request.json` — the consumed request
+- `<timestamp>-<request_id>.stale-baseline.json` — invalidated session baseline (if one existed)
+
+## BOM Safety
+
+PowerShell 5.1's `Set-Content -Encoding UTF8` writes UTF-8 WITH BOM (bytes 0xEF, 0xBB, 0xBF). `ConvertFrom-Json` cannot parse JSON with a leading BOM character. All manifest and sidecar writes use:
+
+```powershell
+$Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+[System.IO.File]::WriteAllText($path, $content, $Utf8NoBom)
+```
+
+Manifest reading uses `Get-Content -Raw` which strips BOM automatically. `[System.Text.Encoding]::UTF8.GetString()` preserves BOM and must NOT be used for JSON parsing.
+
+## Orphan Evidence
+
+PostToolUse evidence without a matching PreToolUse gate (orphan evidence) means:
+- The command executed WITHOUT PreToolUse authorization.
+- PostToolUse ran after execution and found no matching inflight gate.
+- Orphan correlation IDs use the pattern `orphan-TIMESTAMP-HASH12`.
+- This is DIAGNOSTIC evidence, not authorization proof. Orphans indicate the gate was bypassed, not that the command was approved.
+
+### Root Cause of Orphans
+
+The most common cause is PreToolUse hook crash → non-zero exit → Claude Code treats as "hook error, proceed normally." The BOM crash (Phase 3.96 fix) produced orphans because `ConvertFrom-Json` threw on BOM-prefixed manifest JSON, causing exit 1.
+
+## CAPI Actuator Boundary
+
+CAPI (CODEAPI) is Robert's separate IDE actuator program. It is NOT part of the Helios security architecture. Helios gates the outer CAPI-Term invocation at the shell level. CAPI terminal commands require a declared workspace, target repo, semantic operation, and write impact in the gate.
+
 ## Rebaseline Process
 
-When any protected file changes:
-1. A model or human proposes the change.
-2. A human approves the rebaseline.
-3. Run `tools/New-HeliosEnvelopeManifest.ps1 -GateRoot <path> -RebaselinedBy human`.
-4. Verify: `tools/Test-HeliosEnvelopeIntegrity.ps1 -GateRoot <path>`.
-5. Next gated command creates a new session baseline automatically.
+Two methods:
+
+### Method 1: Maintenance Corridor (during drift)
+1. Create `maintenance/rebaseline-request.json` per schema.
+2. Trigger any shell command — the front controller performs internal rebaseline.
+3. Retry the command — envelope is now clean.
+
+### Method 2: Manual Tool (no current drift)
+1. Run `tools/New-HeliosEnvelopeManifest.ps1 -GateRoot <path> -RebaselinedBy human`.
+2. Verify: `tools/Test-HeliosEnvelopeIntegrity.ps1 -GateRoot <path>`.
+3. Next gated command creates a new session baseline automatically.
 
 ## Schemas
 
@@ -174,3 +238,4 @@ See `schemas/` for JSON Schema definitions:
 - `helios-envelope.v1.schema.json` — durable manifest
 - `helios-baseline.v1.schema.json` — session baseline
 - `helios-command-evidence.v1.schema.json` — per-command evidence
+- `helios-maintenance-rebaseline.v1.schema.json` — maintenance rebaseline request
