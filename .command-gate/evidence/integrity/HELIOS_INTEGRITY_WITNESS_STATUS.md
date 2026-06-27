@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-**Phase 3.96** — Maintenance rebaseline corridor, BOM fix, fail-closed hardening.
+**Phase 3.97** — TCE adapter gap-test completion and lock-requirement derivation.
 
 ## Architecture
 
@@ -74,6 +74,17 @@ Current detection model: **detection-on-next-shell-action**. Direct file-edit to
 - **Pester tests expanded:** `tests/HeliosIntegrity.Tests.ps1` — added maintenance corridor tests: Read-MaintenanceRebaselineRequest, Test-MaintenanceRebaselineRequest (expired, wrong schema, hash mismatch, drift path mismatch, valid), Invoke-InternalRebaseline (BOM-free verify), BOM-safe parsing (Get-Content strips BOM, UTF8.GetString preserves BOM).
 - **Recovery sequence verified:** Maintenance rebaseline → envelope CLEAN → no-gate deny → valid-gate allow with full evidence chain (before, decision, after, compare). correlation_id: `phase396-allow-test-final`.
 - **CAPI boundary documented:** CAPI is Robert's separate IDE actuator program, NOT part of Helios security architecture.
+
+### Phase 3.97 — TCE adapter gap-test completion and lock-requirement derivation
+- **TCE adapter spec created:** `tce-helios-integrity-adapter-spec.md` — defines TCE-owned concepts: local evidence schema, envelope model, failure taxonomy, drift taxonomy, ownership boundaries, Phase 4 derivation boundary.
+- **TCE orchestration workflow:** `Invoke-HeliosGapTest.ps1` — captures pre/post state, applies controlled mutations, compares envelopes, emits TCE-local evidence.
+- **TCE evidence parser:** `ConvertFrom-HeliosEvidence.ps1` — ingests Helios runtime evidence (gate, result, tool_response, integrity session, blocked, maintenance) and normalizes into TCE-local evidence object with failure classification and lock-requirement hints.
+- **Gap-test matrix:** 12 controlled gap tests defined — 9 LiveControlled, 2 FixtureOnly, 1 PlanOnly (settings.json). Each test has test-plan.json and lock-requirement.json in `evidence/gap-tests/`.
+- **TCE failure taxonomy:** 12 failure classes defined: protected_drift, missing_protected_file, cwd_mismatch, stale_gate, write_indicator_missing_impact, undeclared_chain, mutable_evidence_tamper, failed_missing_tool_response, wrapper_validation_failure, external_control_plane_risk, template_drift, template_unprotected_gap.
+- **Phase 4 lock requirements derived:** 10 lock targets identified (hooks, policy, manifest, sidecar, templates, settings.json). 2 gaps correctly excluded from filesystem locking (cwd mismatch, stale gate). Evidence tamper classified separately from protected-runtime locks. All requirements evidence-backed.
+- **TCE main preserved:** All adapter work on `helios-integrity-adapter` branch. Main at `c594a75` with no adapter entries.
+- **Phase 4 entry criteria met:** Gap-test matrix complete, lock requirements derived from evidence, Helios phase4-lock-handoff.md confirmed and extended.
+- **Remaining blockers:** Live execution of tests 1-3 (protected file mutations), Helios PR #2 merge, Phase 4 packaging decision, TCE main merge decision.
 
 ## Active Hook Configuration
 
@@ -162,8 +173,21 @@ All met:
 | Evidence chain classified | Complete — 24 complete, 4 orphan, 1 incomplete |
 | Final rebaseline | Complete — CLEAN, sidecar valid |
 | Branch committed | Complete |
+| TCE gap-test matrix (Phase 3.97) | Complete — 12 tests, evidence-backed |
+| TCE lock-requirement derivation (Phase 3.97) | Complete — 10 lock targets, 2 exclusions |
+| TCE adapter spec (Phase 3.97) | Complete |
+| TCE orchestration + parser (Phase 3.97) | Complete |
 
 ## Phase 4 — helios-lock (Filesystem Prevention)
 
-See `docs/phase4-lock-handoff.md` for implementation details.
+See `docs/phase4-lock-handoff.md` for Helios-side design.
+See TCE `docs/phase4-lock-requirements-from-gap-tests.md` for evidence-derived lock requirements.
 See `docs/bypass-surface.md` for the current mutation risk surface (3 unmitigated gaps + 2 newly documented: PreToolUse crash fail-open, maintenance corridor abuse).
+
+### Phase 5 — helios-lock Implementation (Future)
+
+Python or PowerShell package implementing OS-native filesystem locks. Not started. Blocked on Phase 4 requirements finalization and packaging decision.
+
+### Phase 6 — Lock Verification Evidence (Future)
+
+Lock state verification integrated into integrity evidence. Not started. Blocked on Phase 5 implementation.
