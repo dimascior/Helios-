@@ -6,11 +6,11 @@ Three layers, each with a distinct role:
 
 | Layer | Role | Status |
 |---|---|---|
-| **TCE** (TerminalContextExporter) | Local integrity witness concept. Design lineage and reference implementation for envelope hashing, snapshot comparison, and evidence writing. | Reference/lineage |
-| **Helios** (command gate) | Runtime command enforcement. Gates Bash/PowerShell tool uses via PreToolUse/PostToolUse hooks. Vendors a TCE-style witness bridge for integrity verification. | Active runtime |
+| **TCE** (TerminalContextExporter) | Source-of-truth owner of the integrity bridge adapter. Maintains the canonical implementation at `Adapters/Helios/HeliosIntegrityBridge.ps1` in its own repo. | Source-of-truth owner |
+| **Helios** (command gate) | Runtime command enforcement. Gates Bash/PowerShell tool uses via PreToolUse/PostToolUse hooks. Vendors a byte-identical copy of the TCE bridge for integrity verification. | Active runtime |
 | **helios-lock** | Filesystem prevention. OS-native locks (icacls/chattr/chflags/chmod) that prevent modification of protected files between integrity checks. | Phase 4+ (not yet implemented) |
 
-Helios owns the command-gate runtime. TerminalContextExporter remains reference lineage for the witness design. The vendored bridge at `hooks/lib/HeliosIntegrityBridge.ps1` is the only TCE-derived artifact in the active hook path. helios-lock will close the gap between detection and prevention.
+Helios owns the command-gate runtime. TCE owns the source-of-truth bridge implementation at `TerminalContextExporter/MyExporter/Adapters/Helios/HeliosIntegrityBridge.ps1`. Helios vendors a byte-identical copy at `hooks/lib/HeliosIntegrityBridge.ps1` inside its protected envelope. The vendored copy's hash is recorded in the Helios manifest. helios-lock will close the gap between detection and prevention.
 
 ## Current Detection Model
 
@@ -129,7 +129,7 @@ Denied commands get `before.json` and `decision.json`. Allowed commands get all 
 
 ## Bridge API
 
-Seven functions vendored from TCE lineage. Self-contained, no module imports. PowerShell 5.1+ compatible.
+Seven functions vendored from TCE source-of-truth. Self-contained, no module imports. PowerShell 5.1+ compatible.
 
 | Function | Purpose |
 |---|---|

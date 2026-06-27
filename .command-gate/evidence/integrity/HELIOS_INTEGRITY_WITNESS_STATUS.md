@@ -6,7 +6,7 @@
 
 ## Architecture
 
-Helios owns the command-gate runtime. Helios vendors a TCE-style witness bridge at `hooks/lib/HeliosIntegrityBridge.ps1`. TerminalContextExporter remains reference lineage for the witness design. helios-lock is Phase 4+ prevention.
+Helios owns the command-gate runtime. TCE owns the source-of-truth bridge implementation. Helios vendors a byte-identical copy at `hooks/lib/HeliosIntegrityBridge.ps1` from TCE's `Adapters/Helios/HeliosIntegrityBridge.ps1`. helios-lock is Phase 4+ prevention.
 
 Current detection model: **detection-on-next-shell-action**. Direct file-edit tools (Edit, Write, NotebookEdit) can modify protected files without triggering a hook. The modification is detected when the next Bash/PowerShell command fires. Phase 4 helios-lock provides prevention.
 
@@ -18,7 +18,7 @@ Current detection model: **detection-on-next-shell-action**. Direct file-edit to
 - `evidence/integrity/sessions/` directory structure established.
 
 ### Phase 1 — Bridge implementation
-- `hooks/lib/HeliosIntegrityBridge.ps1` — self-contained witness bridge vendored from TCE lineage.
+- `hooks/lib/HeliosIntegrityBridge.ps1` — self-contained witness bridge vendored from TCE source-of-truth.
 - 7 functions: Get-FileSha256, Get-HeliosEnvelopeSnapshot, Compare-HeliosProtectedEnvelope, Compare-HeliosRuntimeTransition, New-HeliosSessionBaseline, Test-HeliosIntegrity, Write-HeliosIntegrityEvidence.
 
 ### Phase 1.5 — Front controller
@@ -51,7 +51,7 @@ Current detection model: **detection-on-next-shell-action**. Direct file-edit to
 - Evidence chain tool: `tools/Test-HeliosEvidenceChain.ps1`.
 - Stale cleanup tool: `tools/Move-HeliosStaleGateArtifacts.ps1`.
 - Pester test suite: `tests/HeliosIntegrity.Tests.ps1`.
-- Architecture correction: TCE is witness lineage, Helios is command-gate runtime, helios-lock is Phase 4+ prevention.
+- Architecture correction: TCE is source-of-truth bridge owner, Helios is command-gate runtime, helios-lock is Phase 4+ prevention.
 
 ### Phase 3.75 — Cleanup, verification, and branch readiness
 - 14-point checkpoint completed: hooks, envelope, baseline, evidence chain, stale artifacts, templates, docs, schemas, tools, tests, manifest integrity, bypass surface, Phase 4 readiness.
@@ -161,7 +161,7 @@ All met:
 | Stale artifacts cleaned | Complete — 13 archived |
 | Evidence chain classified | Complete — 24 complete, 4 orphan, 1 incomplete |
 | Final rebaseline | Complete — CLEAN, sidecar valid |
-| Branch committed | Pending |
+| Branch committed | Complete |
 
 ## Phase 4 — helios-lock (Filesystem Prevention)
 

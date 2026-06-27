@@ -116,6 +116,8 @@ Current mutation risks for the Helios command-gate system, organized by attack v
 | Baseline tampering | Durable manifest catches primary drift | — | Could lock after creation |
 | Stale inflight | — | — | Cleanup tool |
 | Templates manipulation | **Gap** (not in manifest) | — | Prevents |
+| PreToolUse crash (fail-open) | Orphan evidence diagnostic | — | — |
+| Maintenance corridor abuse | Validates request fields | — | Prevents writes to maintenance/ |
 
 ### 10. PreToolUse hook crash (fail-open)
 
@@ -138,22 +140,6 @@ Current mutation risks for the Helios command-gate system, organized by attack v
 | **Detection timing** | At validation time (PreToolUse) |
 | **Prevented by** | Validation logic: request must name the exact drifted files and match the current sidecar hash |
 | **Risk** | An attacker who controls the drift AND the maintenance request could authorize their own rebaseline. Mitigated by: (a) the request must specify the exact drifted paths, (b) base_manifest_hash must match the sidecar at request creation time, (c) human authorization is required to create the request. Phase 4 helios-lock would prevent unauthorized writes to `maintenance/`. |
-
-## Layer Responsibility Summary
-
-| Risk | TCE Witness | Helios Gate | helios-lock (Phase 4) |
-|---|---|---|---|
-| Hook file edit (Edit/Write) | Detects on next shell | — | Prevents |
-| Hook file edit (shell) | Detects on next shell | Blocks if no gate | Prevents |
-| Policy edit (Edit/Write) | Detects on next shell | — | Prevents |
-| Manifest+sidecar coordinated edit | **Gap** | — | Prevents |
-| settings.json edit | **Gap** | — | Prevents |
-| Fabricated gate file | — | Validates schema/hash | — |
-| Baseline tampering | Durable manifest catches primary drift | — | Could lock after creation |
-| Stale inflight | — | — | Cleanup tool |
-| Templates manipulation | **Gap** (not in manifest) | — | Prevents |
-| PreToolUse crash (fail-open) | Orphan evidence diagnostic | — | — |
-| Maintenance corridor abuse | Validates request fields | — | Prevents writes to maintenance/ |
 
 ## Cleanup and Archive Requirements
 
