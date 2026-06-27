@@ -237,16 +237,117 @@ if (-not $IsOrphan -and $MatchedGateFile) {
     try { Move-Item -Path $MatchedGateFile.FullName -Destination $GateDest -Force } catch {}
 }
 
+# --- Integrity evidence (Helios bridge) ---
+$IntegrityWarning = $null
+try {
+    $BridgePath = Join-Path $GateRoot 'hooks\lib\HeliosIntegrityBridge.ps1'
+    if ((Test-Path $BridgePath) -and $SessionId -and $ToolUseId) {
+        . $BridgePath
+
+        $ManifestPath = Join-Path $GateRoot 'manifest\helios-envelope.json'
+        $ManifestHashes = @{}
+        if (Test-Path $ManifestPath) {
+            $mJson = Get-Content $ManifestPath -Raw | ConvertFrom-Json
+            foreach ($prop in $mJson.protected.hashes.PSObject.Properties) {
+                $ManifestHashes[$prop.Name] = $prop.Value
+            }
+        }
+
+        if ($ManifestHashes.Count -gt 0) {
+            $PostSnapshot = Get-HeliosEnvelopeSnapshot `
+                -GateRoot $GateRoot -ManifestHashes $ManifestHashes `
+                -SessionId $SessionId -ToolUseId $ToolUseId `
+                -CommandSha256 $Hash -CorrelationId $CorrelationId `
+                -Cwd $PayloadCwd -Shell $ToolName.ToLower()
+
+            Write-HeliosIntegrityEvidence -GateRoot $GateRoot `
+                -SessionId $SessionId -ToolUseId $ToolUseId `
+                -EvidenceType 'after' -Data @{
+                    timestamp_utc  = (Get-Date).ToUniversalTime().ToString('o')
+                    session_id     = $SessionId
+                    tool_use_id    = $ToolUseId
+                    command_sha256 = $Hash
+                    correlation_id = $CorrelationId
+                    hook_event     = $HookEvent
+                    protected      = $PostSnapshot.protected
+                    mutable        = $PostSnapshot.mutable
+                    context        = $PostSnapshot.context
+                } | Out-Null
+
+            $BeforePath = Join-Path $GateRoot "evidence\integrity\sessions\$SessionId\commands\$ToolUseId.before.json"
+            if (Test-Path $BeforePath) {
+                $BeforeData = Get-Content $BeforePath -Raw | ConvertFrom-Json
+
+                $BaselinePath = Join-Path $GateRoot "evidence\integrity\sessions\$SessionId\baseline.json"
+                $BaselineHashes = $null
+                if (Test-Path $BaselinePath) {
+                    $bJson = Get-Content $BaselinePath -Raw | ConvertFrom-Json
+                    $BaselineHashes = @{}
+                    foreach ($prop in $bJson.protected_hashes.PSObject.Properties) {
+                        $BaselineHashes[$prop.Name] = $prop.Value
+                    }
+                }
+
+                $ProtectedResult = Compare-HeliosProtectedEnvelope `
+                    -CurrentSnapshot $PostSnapshot `
+                    -ManifestHashes $ManifestHashes `
+                    -BaselineHashes $BaselineHashes
+
+                $BeforeMutable = @{}
+                foreach ($prop in $BeforeData.mutable.PSObject.Properties) {
+                    $BeforeMutable[$prop.Name] = @{
+                        count = $prop.Value.count
+                        files = @($prop.Value.files)
+                    }
+                }
+
+                $MutationProfile = 'ALLOW_POSTTOOL'
+                $RuntimeResult = Compare-HeliosRuntimeTransition `
+                    -BeforeMutable $BeforeMutable `
+                    -AfterMutable $PostSnapshot.mutable `
+                    -ExpectedMutationProfile $MutationProfile
+
+                Write-HeliosIntegrityEvidence -GateRoot $GateRoot `
+                    -SessionId $SessionId -ToolUseId $ToolUseId `
+                    -EvidenceType 'compare' -Data @{
+                        timestamp_utc     = (Get-Date).ToUniversalTime().ToString('o')
+                        session_id        = $SessionId
+                        tool_use_id       = $ToolUseId
+                        command_sha256    = $Hash
+                        correlation_id    = $CorrelationId
+                        hook_event        = $HookEvent
+                        protected_verdict = $ProtectedResult.verdict
+                        protected_details = $ProtectedResult.details
+                        runtime_verdict   = $RuntimeResult.verdict
+                        runtime_profile   = $RuntimeResult.profile
+                        runtime_details   = $RuntimeResult.details
+                    } | Out-Null
+
+                if ($ProtectedResult.verdict -ne 'CLEAN') {
+                    $driftPaths = @($ProtectedResult.details |
+                        Where-Object { $_.drift_source.Count -gt 0 } |
+                        ForEach-Object { $_.path }) -join ', '
+                    $IntegrityWarning = " INTEGRITY WARNING: protected envelope drift in: $driftPaths"
+                }
+            }
+        }
+    }
+} catch {}
+
 # Output additionalContext
 $StatusWord = if ($Success) { 'succeeded' } else { 'failed' }
 $ExitInfo = ''
 if ($null -ne $ExitCode) {
     $ExitInfo = " Exit=$ExitCode (source: $ExitCodeSource)."
 }
+$ContextMsg = "[EVIDENCE:$CorrelationId] Command $StatusWord.$ExitInfo Compare EXPECTED from the gate vs ACTUAL output before creating the next gate."
+if ($IntegrityWarning) {
+    $ContextMsg += $IntegrityWarning
+}
 $Out = @{
     hookSpecificOutput = @{
         hookEventName = $HookEvent
-        additionalContext = "[EVIDENCE:$CorrelationId] Command $StatusWord.$ExitInfo Compare EXPECTED from the gate vs ACTUAL output before creating the next gate."
+        additionalContext = $ContextMsg
     }
 }
 
