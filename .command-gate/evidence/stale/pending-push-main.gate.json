@@ -1,0 +1,20 @@
+{
+  "schema_version": "command-gate.v1",
+  "correlation_id": "push-main",
+  "created_utc": "2026-06-25T18:24:00Z",
+  "expires_utc": "2026-06-25T23:00:00Z",
+  "command": "node contained-capi-mcp/cli/dist/cli.js -s 58267c70 --json exec \"return capiTerm.write('tmqto4stb', 'git push origin main\\n')\"",
+  "command_sha256": "placeholder",
+  "working_directory": "C:\\Users\\dimas\\Desktop\\CODEAPI",
+  "shell": "bash",
+  "risk_tier": 0,
+  "exit_capture": "not_applicable",
+  "exit_capture_reason": "no_exit_code_semantic",
+  "multi_command": false,
+  "segments": [],
+  "need": "Push rebased main branch with merged README to GitHub Helios repo",
+  "expected": "Push succeeds, showing commit range pushed to origin/main",
+  "actual_means": "If push succeeds, the comprehensive README is live on GitHub",
+  "next_logic": "Verify push succeeded by reading terminal buffer",
+  "approval_boundary": "This gate makes the command eligible for permission flow only; it does not auto-approve execution."
+}

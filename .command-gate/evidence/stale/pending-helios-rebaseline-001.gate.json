@@ -1,0 +1,20 @@
+{
+  "schema_version": "command-gate.v1",
+  "correlation_id": "helios-rebaseline-001",
+  "created_utc": "2026-06-26T23:50:00Z",
+  "expires_utc": "2026-06-27T12:00:00Z",
+  "command": "$root = 'C:\\Users\\dimas\\Desktop\\MythosJustAFable\\.command-gate'; @('hooks\\gate_check.ps1','hooks\\evidence_capture.ps1','hooks\\tier_classifier.ps1','hooks\\helios_pretooluse.ps1','hooks\\lib\\HeliosIntegrityBridge.ps1','policy\\command-policy.json') | ForEach-Object { \"$_`: $((Get-FileHash (Join-Path $root $_) -Algorithm SHA256).Hash.ToLower())\" }",
+  "command_sha256": "5679c5b1b67896799838939132707d8604912a0a57b920731a85d5bf96e4e131",
+  "working_directory": "C:\\Users\\dimas\\Desktop\\CODEAPI",
+  "shell": "powershell",
+  "risk_tier": 0,
+  "exit_capture": "not_applicable",
+  "exit_capture_reason": "pure_output",
+  "multi_command": false,
+  "segments": [],
+  "need": "Compute SHA256 hashes for all protected envelope files to rebaseline the manifest",
+  "expected": "Six lines of file:hash pairs",
+  "actual_means": "Hash values are current and can be written to helios-envelope.json",
+  "next_logic": "Update manifest with new hashes, recompute sidecar",
+  "approval_boundary": "This gate makes the command eligible for permission flow only; it does not auto-approve execution."
+}

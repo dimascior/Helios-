@@ -1,0 +1,31 @@
+{
+  "schema_version": "command-gate.v1",
+  "correlation_id": "capi-cleanup-exec",
+  "created_utc": "2026-06-27T06:00:00Z",
+  "expires_utc": "2026-06-27T23:59:59Z",
+  "command": ". C:\\Users\\dimas\\Desktop\\CODEAPI\\scripts\\capi-helpers.ps1; Capi-Term 3639 'powershell -NoProfile -File .command-gate\\tools\\Move-HeliosStaleGateArtifacts.ps1 -GateRoot .command-gate'",
+  "command_sha256": "f38e2a5ad901faee51d9b21771761c2d65268b07dd19fc0974e7bb0e2b9b512d",
+  "working_directory": "C:\\Users\\dimas\\Desktop\\CODEAPI",
+  "shell": "PowerShell",
+  "risk_tier": 0,
+  "exit_capture": "not_applicable",
+  "exit_capture_reason": "pure_output",
+  "multi_command": true,
+  "segments": [
+    {
+      "index": 0,
+      "command": ". C:\\Users\\dimas\\Desktop\\CODEAPI\\scripts\\capi-helpers.ps1",
+      "purpose": "dot-source CODEAPI terminal helpers"
+    },
+    {
+      "index": 1,
+      "command": "Capi-Term 3639 'powershell -NoProfile -File .command-gate\\tools\\Move-HeliosStaleGateArtifacts.ps1 -GateRoot .command-gate'",
+      "purpose": "archive stale pending/inflight gates and compute-hashes.ps1 via CODEAPI terminal"
+    }
+  ],
+  "need": "Archive stale runtime artifacts before final rebaseline",
+  "expected": "JSON with total_moved > 0, stale gates moved to evidence/stale/, cleanup-summary.json written",
+  "actual_means": "Stale artifacts archived, pending/ and inflight/ clean for Phase 4",
+  "next_logic": "Run evidence chain verification, then final rebaseline",
+  "approval_boundary": "This gate makes the command eligible for permission flow only; it does not auto-approve execution."
+}

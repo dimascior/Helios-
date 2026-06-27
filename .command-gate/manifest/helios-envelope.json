@@ -1,0 +1,36 @@
+﻿{
+    "schema_version":  "helios-envelope.v1",
+    "created_utc":  "2026-06-27T04:45:12Z",
+    "rebaselined_by":  "human",
+    "protected":  {
+                      "description":  "Must not change during gated execution",
+                      "paths":  [
+                                    "hooks/gate_check.ps1",
+                                    "hooks/evidence_capture.ps1",
+                                    "hooks/tier_classifier.ps1",
+                                    "hooks/helios_pretooluse.ps1",
+                                    "hooks/lib/HeliosIntegrityBridge.ps1",
+                                    "policy/command-policy.json",
+                                    "manifest/helios-envelope.json",
+                                    "manifest/helios-envelope.sha256"
+                                ],
+                      "hashes":  {
+                                     "hooks/gate_check.ps1":  "004aaae86bd5ff666b191576c1a4eef12b549b214c5c6a26e83553bb1f53114c",
+                                     "hooks/evidence_capture.ps1":  "b7c80f66b44de5ed749d963bc1c65108af5f44cb5c5296751520db3f05f88b10",
+                                     "hooks/tier_classifier.ps1":  "b1bc9475898e473a829ea6c4b3f39f2e7578fe2864326cf39a18716db14bf2aa",
+                                     "hooks/helios_pretooluse.ps1":  "d81770992d736e029e3d1452977a1696c3bd8974d5d96212c1402951d2c91d97",
+                                     "hooks/lib/HeliosIntegrityBridge.ps1":  "c26f927dbe1e52fbc9da2db473fd7c69b0d21a0e1b9b915a8d4b5710b8bc8b0a",
+                                     "policy/command-policy.json":  "838ede2f4a195d5435c6f22033ef59dca0f785a84743a74ed01f2db4a6dd6488"
+                                 }
+                  },
+    "mutable":  {
+                    "description":  "Must change as part of gate lifecycle",
+                    "dirs":  [
+                                 "pending/",
+                                 "inflight/",
+                                 "evidence/",
+                                 "blocked/"
+                             ]
+                },
+    "note":  "Phase 3.75 rebaseline after cleanup and boundary clarification"
+}

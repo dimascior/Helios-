@@ -1,0 +1,20 @@
+{
+  "schema_version": "command-gate.v1",
+  "correlation_id": "read-rebase-status",
+  "created_utc": "2026-06-25T18:20:00Z",
+  "expires_utc": "2026-06-25T23:00:00Z",
+  "command": "node contained-capi-mcp/cli/dist/cli.js -s 58267c70 --json exec \"return capiTerm.read('tmqto4stb', {tail:4000})\"",
+  "command_sha256": "959721de24e07dcdaed0d22446f889d3a7e72e45602d1e69420807a47ad523b0",
+  "working_directory": "C:\\Users\\dimas\\Desktop\\CODEAPI",
+  "shell": "bash",
+  "risk_tier": 0,
+  "exit_capture": "not_applicable",
+  "exit_capture_reason": "no_exit_code_semantic",
+  "multi_command": false,
+  "segments": [],
+  "need": "Read terminal buffer to verify rebase completed after closing the editor",
+  "expected": "Output showing rebase completed successfully, back at shell prompt",
+  "actual_means": "If rebase succeeded, ready to push. If still in editor or error, need different approach",
+  "next_logic": "If rebase complete, push to origin main",
+  "approval_boundary": "This gate makes the command eligible for permission flow only; it does not auto-approve execution."
+}

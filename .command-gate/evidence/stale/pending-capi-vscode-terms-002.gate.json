@@ -1,0 +1,20 @@
+{
+  "schema_version": "command-gate.v1",
+  "correlation_id": "capi-vscode-terms-002",
+  "created_utc": "2026-06-25T15:40:00Z",
+  "expires_utc": "2026-06-25T21:00:00Z",
+  "command": "node contained-capi-mcp/cli/dist/cli.js -s 58267c70 --json exec \"var r=[]; vscode.window.terminals.forEach(function(t){r.push(t.name)}); return r\"",
+  "command_sha256": "86bfdccf0b3520781a4221e406598113b4a10ad3b4947d5cf37489df405026bc",
+  "working_directory": "C:\\Users\\dimas\\Desktop\\CODEAPI",
+  "shell": "bash",
+  "risk_tier": 0,
+  "exit_capture": "not_applicable",
+  "exit_capture_reason": "pure_output",
+  "multi_command": false,
+  "segments": [],
+  "need": "List VS Code terminal names to find the user's terminal with PID 23544",
+  "expected": "JSON array of terminal name strings from the VS Code window on port 3638",
+  "actual_means": "vscode.window.terminals API lists all integrated terminals in the extension host",
+  "next_logic": "Identify the terminal and create a CAPI PTY to cd into MythosJustAFable and run git push",
+  "approval_boundary": "This gate makes the command eligible for permission flow only; it does not auto-approve execution."
+}

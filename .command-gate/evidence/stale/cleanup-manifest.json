@@ -1,0 +1,25 @@
+{
+  "created_utc": "2026-06-26T00:00:00Z",
+  "description": "Stale gate artifacts identified during Phase 3.5 Helios repo formalization. Run Move-HeliosStaleGateArtifacts.ps1 from a regular terminal to execute the moves.",
+  "pending_stale": [
+    "pending/capi-vscode-terms-001.gate.json",
+    "pending/capi-vscode-terms-002.gate.json",
+    "pending/read-rebase-status.gate.json",
+    "pending/push-main.gate.json",
+    "pending/pull-test-clone.gate.json",
+    "pending/git-commit-yoursys.gate.json",
+    "pending/phase0-mkdir.gate.json",
+    "pending/helios-test-001.gate.json",
+    "pending/helios-rebaseline-001.gate.json"
+  ],
+  "inflight_stale": [
+    "inflight/toolu_01Y2EY25oT7YCeaV4vAhkXtb-commit-diag-update.gate.json",
+    "inflight/toolu_01GY719ieSrKbHrWNvrybE8d-capi-post-terminal.gate.json"
+  ],
+  "root_stale": [
+    "compute-hashes.ps1"
+  ],
+  "total_artifacts": 12,
+  "cleanup_command": "& .command-gate\\tools\\Move-HeliosStaleGateArtifacts.ps1 -GateRoot .command-gate",
+  "dry_run_command": "& .command-gate\\tools\\Move-HeliosStaleGateArtifacts.ps1 -GateRoot .command-gate -DryRun"
+}

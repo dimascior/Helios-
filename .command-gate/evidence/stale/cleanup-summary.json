@@ -1,0 +1,86 @@
+﻿{
+    "timestamp_utc":  "2026-06-27T04:43:29.7783398Z",
+    "artifacts":  [
+                      {
+                          "destination":  "evidence/stale/pending-capi-vscode-terms-001.gate.json",
+                          "size_bytes":  1123,
+                          "source":  "pending/capi-vscode-terms-001.gate.json",
+                          "action":  "moved"
+                      },
+                      {
+                          "destination":  "evidence/stale/pending-capi-vscode-terms-002.gate.json",
+                          "size_bytes":  1149,
+                          "source":  "pending/capi-vscode-terms-002.gate.json",
+                          "action":  "moved"
+                      },
+                      {
+                          "destination":  "evidence/stale/pending-git-commit-yoursys.gate.json",
+                          "size_bytes":  990,
+                          "source":  "pending/git-commit-yoursys.gate.json",
+                          "action":  "moved"
+                      },
+                      {
+                          "destination":  "evidence/stale/pending-helios-rebaseline-001.gate.json",
+                          "size_bytes":  1280,
+                          "source":  "pending/helios-rebaseline-001.gate.json",
+                          "action":  "moved"
+                      },
+                      {
+                          "destination":  "evidence/stale/pending-helios-test-001.gate.json",
+                          "size_bytes":  869,
+                          "source":  "pending/helios-test-001.gate.json",
+                          "action":  "moved"
+                      },
+                      {
+                          "destination":  "evidence/stale/pending-phase0-mkdir.gate.json",
+                          "size_bytes":  1444,
+                          "source":  "pending/phase0-mkdir.gate.json",
+                          "action":  "moved"
+                      },
+                      {
+                          "destination":  "evidence/stale/pending-pull-test-clone.gate.json",
+                          "size_bytes":  903,
+                          "source":  "pending/pull-test-clone.gate.json",
+                          "action":  "moved"
+                      },
+                      {
+                          "destination":  "evidence/stale/pending-push-main.gate.json",
+                          "size_bytes":  995,
+                          "source":  "pending/push-main.gate.json",
+                          "action":  "moved"
+                      },
+                      {
+                          "destination":  "evidence/stale/pending-read-rebase-status.gate.json",
+                          "size_bytes":  1077,
+                          "source":  "pending/read-rebase-status.gate.json",
+                          "action":  "moved"
+                      },
+                      {
+                          "destination":  "evidence/stale/inflight-toolu_01GY719ieSrKbHrWNvrybE8d-capi-post-terminal.gate.json",
+                          "size_bytes":  1114,
+                          "source":  "inflight/toolu_01GY719ieSrKbHrWNvrybE8d-capi-post-terminal.gate.json",
+                          "action":  "moved"
+                      },
+                      {
+                          "destination":  "evidence/stale/inflight-toolu_01UNd4PiTXSuZtRsSJywppd3-capi-cleanup-exec.gate.json",
+                          "size_bytes":  1597,
+                          "source":  "inflight/toolu_01UNd4PiTXSuZtRsSJywppd3-capi-cleanup-exec.gate.json",
+                          "action":  "moved"
+                      },
+                      {
+                          "destination":  "evidence/stale/inflight-toolu_01Y2EY25oT7YCeaV4vAhkXtb-commit-diag-update.gate.json",
+                          "size_bytes":  1380,
+                          "source":  "inflight/toolu_01Y2EY25oT7YCeaV4vAhkXtb-commit-diag-update.gate.json",
+                          "action":  "moved"
+                      },
+                      {
+                          "destination":  "evidence/stale/compute-hashes.ps1",
+                          "size_bytes":  387,
+                          "source":  "compute-hashes.ps1",
+                          "action":  "moved"
+                      }
+                  ],
+    "total_pending":  0,
+    "total_moved":  13,
+    "dry_run":  false
+}

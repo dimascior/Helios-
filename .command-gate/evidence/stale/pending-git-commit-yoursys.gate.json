@@ -1,0 +1,22 @@
+{
+  "schema_version": "command-gate.v1",
+  "correlation_id": "git-commit-yoursys",
+  "created_utc": "2026-06-26T03:47:00Z",
+  "expires_utc": "2026-06-26T12:00:00Z",
+  "command": "git -C 'C:\\Users\\dimas\\Desktop\\MythosJustAFable' commit -m 'Remove \"on your system\" from intro — neutral framing'",
+  "command_sha256": "PLACEHOLDER",
+  "working_directory": "C:\\Users\\dimas\\Desktop\\CODEAPI",
+  "shell": "powershell",
+  "risk_tier": 3,
+  "exit_capture": "not_applicable",
+  "exit_capture_reason": "pure_output",
+  "multi_command": false,
+  "segments": [],
+  "need": "Commit README wording fix",
+  "expected": "Commit created",
+  "actual_means": "Neutral framing committed",
+  "next_logic": "Push to GitHub",
+  "stop_conditions": "Abort if commit fails",
+  "read_write_impact": { "reads": [".git/index"], "writes": [".git/objects", ".git/refs/heads/main"] },
+  "approval_boundary": "This gate makes the command eligible for permission flow only; it does not auto-approve execution."
+}
