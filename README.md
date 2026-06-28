@@ -25,6 +25,7 @@ Helios is not model-specific. Any model or agent can operate through it if it ca
 
 - **Windows 10+** — PowerShell 5.1 is included. PowerShell Core (`pwsh`) also works.
 - **Linux** — PowerShell Core (`pwsh`) 7.4+. Tested on Void Linux (glibc). Lock features require `chattr`/`lsattr` and root privileges.
+- **macOS** — PowerShell Core (`pwsh`) 7.4+. Tested on macOS 14.6.1 (23G93). Lock features use `chflags` (uchg/nouchg) and `ls -lO` for status. User-level — no root required. Active runtime locking deferred until Akashic fixture and installer Prepare pass.
 - **Claude Code** — installed and available in terminal (`claude` command).
 - **Git** — for cloning the repository.
 
