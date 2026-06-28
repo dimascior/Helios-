@@ -24,6 +24,7 @@ Helios is not model-specific. Any model or agent can operate through it if it ca
 ### Prerequisites
 
 - **Windows 10+** — PowerShell 5.1 is included. PowerShell Core (`pwsh`) also works.
+- **Linux** — PowerShell Core (`pwsh`) 7.4+. Tested on Void Linux (glibc). Lock features require `chattr`/`lsattr` and root privileges.
 - **Claude Code** — installed and available in terminal (`claude` command).
 - **Git** — for cloning the repository.
 
