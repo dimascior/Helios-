@@ -75,22 +75,25 @@ function Get-TierRequiredFields {
 
 # --- MAIN ---
 
-$RawInput = $null
-try {
-    $RawInput = [Console]::In.ReadToEnd()
-} catch {
-    DenyFatal 'Cannot read stdin'
+# Guard: skip stdin read if already set (dot-sourced from helios_pretooluse.ps1)
+if (-not $RawInput) {
+    try {
+        $RawInput = [Console]::In.ReadToEnd()
+    } catch {
+        DenyFatal 'Cannot read stdin'
+    }
+
+    if ([string]::IsNullOrWhiteSpace($RawInput)) {
+        DenyFatal 'Empty stdin'
+    }
 }
 
-if ([string]::IsNullOrWhiteSpace($RawInput)) {
-    DenyFatal 'Empty stdin'
-}
-
-$Payload = $null
-try {
-    $Payload = $RawInput | ConvertFrom-Json
-} catch {
-    DenyFatal "Cannot parse hook payload: $($_.Exception.Message)"
+if (-not $Payload) {
+    try {
+        $Payload = $RawInput | ConvertFrom-Json
+    } catch {
+        DenyFatal "Cannot parse hook payload: $($_.Exception.Message)"
+    }
 }
 
 $ToolName = $Payload.tool_name
