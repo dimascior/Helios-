@@ -98,3 +98,57 @@ GATE REQUIRED: No valid gate found in pending/ for this command. Tier: 0. SHA256
 Helios is **OPERATIONAL** on Void Linux with the stdin guard fix applied. The gate lifecycle (pending → inflight → evidence) works correctly. The integrity system (Akashic) validates protected file hashes at runtime.
 
 **Action Required:** Merge the `gate_check.ps1` stdin guard fix to upstream.
+
+---
+
+## Phase 4.3.2d: Cross-Platform Validation (2026-06-29)
+
+**Scope:** Validates Reset, Restore, Uninstall, detection, install-origin, and installer flow.
+
+### Results
+
+| Step | Test | Verdict |
+|------|------|---------|
+| 1 | Prerequisites | PASS |
+| 2 | Akashic Trust | PASS |
+| 3 | Installer Plan (-WhatIf) | PASS |
+| 4 | Runtime Deployment | PASS |
+| 5 | Hooks Activation | PASS |
+| 6 | Origin Detection | PASS (ORIGIN_MATCH) |
+| 7 | Gate Lifecycle | PASS |
+| 8 | Integrity Drift | PARTIAL (blocking works) |
+| 9 | Reset | PASS |
+| 10 | Restore | PASS |
+| 11 | Uninstall | PASS |
+
+### Key Hashes (Phase 4.3.2d)
+
+```
+Akashic HEAD:  b5debba4f390e4cc2e13474ea8bb67b434e597ae
+Helios HEAD:   46e23931328f8d37b7ad118b6667fa204aa7790d
+
+Protected Files:
+  gate_check.ps1:           06a58750cd5a96c0b4be36e3ec1befeaa31fb90ce71324834d881c85075f6342
+  evidence_capture.ps1:     beab97ea548f0edf0826fdc7365f23adef54cba9b21257d2ed0a8902fa832e0b
+  tier_classifier.ps1:      9d41b12d982c0a50c706ba9ee1c17f5ebcd8ade959b7226b31019fbdbf024757
+  helios_pretooluse.ps1:    31e6e82253aa1567367b92985973f799510b3ae17b89ac4379bc6e7092cac7b3
+  HeliosIntegrityBridge.ps1: 8008a336b8d5c35704aa677a57796807f8bb7790d3ff0a9af89767519c51e454
+  command-policy.json:      5e4fc670a3e03947d8ab0c5d64a1c59faf5c92dd887ee25474d147425359639f
+```
+
+### Archives Created
+
+```
+maintenance/archives/
+├── 20260629-215141-reset/
+├── 20260629-215214-restore/
+└── 20260629-215243-uninstall/
+```
+
+### Platform-Specific Notes
+
+- Lock backend: `chattr/lsattr` (requires sudo for strong enforcement)
+- Exit code capture shows `null` due to PowerShell stderr parsing limitation
+- Edit/Write tools bypass hooks (file-level protection needs OS locks)
+
+**Full Evidence:** See `Akashic/evidence/phase432d/void-linux-runtime-validation-raw-results.md`
