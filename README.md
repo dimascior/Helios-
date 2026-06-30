@@ -40,19 +40,32 @@ The repository ships ready to use. No build step, no package install, no path co
 
 ```text
 Helios-/
-  .claude/settings.json              Hook wiring (relative paths, works on any machine)
+  .claude/settings.json                    Hook wiring (relative paths, works on any machine)
   .command-gate/
     hooks/
-      gate_check.ps1                 PreToolUse validation
-      evidence_capture.ps1           PostToolUse evidence capture
-      tier_classifier.ps1            Risk tier classification
+      helios_pretooluse.ps1                Front controller — manifest/baseline integrity before policy
+      gate_check.ps1                       Gate validation — hash, cwd, tier, segments, chain linkage
+      tier_classifier.ps1                  Risk tier classification and capability flag detection
+      command_decomposer.ps1               Segment decomposition and chain structure validation
+      evidence_capture.ps1                 PostToolUse/PostToolUseFailure uniform evidence writer
+      control_plane_watcher.ps1            Enforcement-path snapshots and before/after diff
+      session_continuity.ps1               Session ledger — pretooluse_seen, gate_consumed, evidence_written
+      lib/
+        HeliosIntegrityBridge.ps1          Vendored Akashic bridge for envelope snapshots
     policy/
-      command-policy.json            Tier patterns, write indicators, exit-capture rules
-    templates/                       Gate templates (optional)
-    pending/                         Gates waiting to be consumed (empty on clone)
-    inflight/                        Gates currently executing (empty on clone)
-    evidence/                        Completed gates and sidecars (empty on clone)
-    blocked/                         Rejected command records (empty on clone)
+      command-policy.json                  Tier patterns, write indicators, capability patterns, control-plane paths
+    manifest/
+      helios-envelope.json                 Protected-file SHA-256 manifest
+      helios-envelope.sha256               Sidecar hash of the manifest itself
+      helios-install-origin.json           Install origin metadata
+    schemas/                               JSON Schema definitions
+    templates/                             Gate templates and catalog entries (optional)
+    pending/                               Gates waiting to be consumed (empty on clone)
+    inflight/                              Gates currently executing (empty on clone)
+    evidence/                              Completed gates and sidecars (empty on clone)
+    blocked/                               Rejected command records (empty on clone)
+    session/                               Append-only session ledger (runtime state, gitignored)
+    posttooluse-errors/                    PostToolUse heartbeat and error diagnostics (runtime)
   README.md
   LICENSE
 ```
@@ -135,6 +148,9 @@ A command becomes eligible for normal Claude Code permission flow only when a ga
 - exit-capture policy
 - write-impact declaration when the command can modify state
 - multi-command declaration when chaining is used
+- capability-required impact when inline interpreters, dynamic eval, or encoded execution are detected
+- segment match between declared segments and decomposed command structure
+- evidence-chain linkage to the previous command's evidence (or explicit new-chain declaration)
 
 A valid gate does not auto-approve execution. It only allows the command to proceed to the normal permission layer.
 
@@ -143,19 +159,21 @@ A valid gate does not auto-approve execution. It only allows the command to proc
 ```text
 pending/   -> PreToolUse validates -> inflight/ -> PostToolUse captures -> evidence/
 blocked/   <- denied attempts
+session/   <- append-only session ledger (pretooluse_seen, gate_consumed, posttooluse_evidence_written)
 ```
 
 The gate lifecycle is single-use.
 
 1. The agent attempts a `Bash` or `PowerShell` command.
 2. Claude Code fires the `PreToolUse` hook.
-3. `gate_check.ps1` reads the hook payload, extracts `tool_input.command`, computes the SHA-256 of the exact command string, and classifies the command tier via `tier_classifier.ps1`.
-4. Tier 4 commands are blocked unconditionally, even if a gate exists.
-5. If no valid gate exists, the hook blocks the command and reports the required SHA-256.
-6. If a valid gate exists, the hook validates every field — command text, hash, cwd, shell, expiry, risk tier, required fields, write-impact declarations, exit-capture rules, and chain rules — then moves it to `inflight/` and returns `{}`.
-7. Claude Code proceeds through its normal permission flow.
-8. After execution, `evidence_capture.ps1` looks for the matching inflight gate — preferably by `tool_use_id`, then falls back to command hash. It writes evidence sidecars (`.result.json`, `.tool_response.json`, `.stdout.txt`, `.stderr.txt`) and moves the consumed gate to `evidence/`.
-9. The evidence hook injects context telling the agent to compare expected output against actual output before creating the next gate.
+3. `helios_pretooluse.ps1` runs as front controller: verifies the protected-file manifest and session baseline are intact, loads the control-plane snapshot, checks session continuity against the session ledger, then loads policy and proceeds to gate validation.
+4. `gate_check.ps1` reads the hook payload, extracts `tool_input.command`, computes the SHA-256 of the exact command string, and classifies the command tier via `tier_classifier.ps1` (including capability flags for inline interpreters, dynamic eval, encoded execution, nested shells, and control-plane path references).
+5. Tier 4 commands are blocked unconditionally, even if a gate exists.
+6. If no valid gate exists, the hook blocks the command and reports the required SHA-256.
+7. If a valid gate exists, the hook validates every field — command text, hash, cwd, shell, expiry, risk tier, required fields, write-impact declarations, exit-capture rules, chain rules, capability-required impact, segment match via `command_decomposer.ps1`, and evidence-chain linkage — then moves it to `inflight/` and returns `{}`.
+8. Claude Code proceeds through its normal permission flow.
+9. After execution, `evidence_capture.ps1` looks for the matching inflight gate — preferably by `tool_use_id`, then falls back to command hash. It captures a post-execution control-plane snapshot via `control_plane_watcher.ps1`, compares it against the pre-execution snapshot, checks settings integrity, classifies the command independently, and writes uniform evidence sidecars (`.result.json`, `.gate.json`, `.tool_response.json`, `.stdout.txt`, `.stderr.txt`) containing forensic fields: `detected_tier`, `capability_flags`, `policy_hash`, `hook_versions`, `enforcement_surface`, `segments_match`, `watched_path_diffs`, `settings_integrity_after`, and `session_continuity_status`. It appends a `posttooluse_evidence_written` entry to the session ledger and moves the consumed gate to `evidence/`.
+10. The evidence hook injects context telling the agent to compare expected output against actual output before creating the next gate. If control-plane files changed, this is reported in the injected context.
 
 The agent can discover the hash by first attempting the command without a gate, reading the denied SHA-256 from the block message, writing a matching gate, then retrying the exact same command text.
 
@@ -435,18 +453,49 @@ The block fires before gate matching. Even if a gate exists in `pending/` with a
 ```text
 .command-gate/
   hooks/
-    gate_check.ps1          PreToolUse validation hook
-    tier_classifier.ps1     Risk tier, chain, and write-indicator detection
-    evidence_capture.ps1    PostToolUse / PostToolUseFailure evidence capture
-    debug_hook.ps1          Optional payload discovery hook
+    helios_pretooluse.ps1        Front controller — manifest/baseline integrity before policy load
+    gate_check.ps1               Gate validation — hash, cwd, tier, segments, chain linkage
+    tier_classifier.ps1          Risk tier, capability flags, chain, and write-indicator detection
+    command_decomposer.ps1       Segment decomposition and declared-vs-detected validation
+    evidence_capture.ps1         PostToolUse/PostToolUseFailure uniform forensic evidence writer
+    control_plane_watcher.ps1    Enforcement-path snapshots and before/after diff comparison
+    session_continuity.ps1       Session ledger writes and continuity audit
+    lib/
+      HeliosIntegrityBridge.ps1  Vendored Akashic bridge for envelope snapshots and integrity evidence
   policy/
-    command-policy.json     Tier patterns, exit-capture policy, write indicators
-  pending/                  Gates waiting to be consumed
-  inflight/                 Gates currently executing
-  evidence/                 Completed gate records and sidecars
-  blocked/                  Rejected command records
-  templates/                Gate templates and catalog entries
+    command-policy.json          Tier patterns, write indicators, capability patterns, control-plane paths
+  manifest/
+    helios-envelope.json         Protected-file SHA-256 manifest
+    helios-envelope.sha256       Sidecar hash of the manifest itself
+    helios-install-origin.json   Install origin metadata (watched, not protected)
+  schemas/                       JSON Schema definitions for evidence, envelope, baseline, ledger, etc.
+  templates/                     Gate templates and catalog entries
+  pending/                       Gates waiting to be consumed
+  inflight/                      Gates currently executing
+  evidence/                      Completed gate records and sidecars
+  blocked/                       Rejected command records
+  session/                       Append-only session ledger (runtime state, gitignored)
+  posttooluse-errors/            PostToolUse heartbeat and error diagnostics (runtime)
 ```
+
+### Runtime File Inventory
+
+| File | Role |
+|---|---|
+| `hooks/helios_pretooluse.ps1` | Front controller. Verifies manifest and session baseline integrity before loading policy. Captures pre-execution control-plane snapshot. Checks session continuity. Implements the maintenance rebaseline corridor. |
+| `hooks/gate_check.ps1` | Validates gate files: command text, SHA-256 hash, working directory, shell, expiry, risk tier, required fields, segment match, capability-required impact, and evidence-chain linkage. |
+| `hooks/tier_classifier.ps1` | Classifies commands by tier (0-4). Detects capability flags: inline interpreter execution, dynamic eval, encoded/obfuscated execution, nested shell execution, and control-plane path references. Exports `Get-CommandTier`, `Test-ChainViolation`, `Test-WriteIndicator`. |
+| `hooks/command_decomposer.ps1` | Decomposes chained commands into segments. Validates that declared `segments` in the gate match the detected shell structure. Flags ambiguous parse results. |
+| `hooks/evidence_capture.ps1` | PostToolUse/PostToolUseFailure hook. Writes uniform forensic evidence: `.result.json`, `.gate.json`, `.tool_response.json`, stdout/stderr files. Every result includes `detected_tier`, `capability_flags`, `policy_hash`, `hook_versions`, `enforcement_surface`, `segments_match`, `watched_path_diffs`, `settings_integrity_after`, and `session_continuity_status`. Appends session ledger entries. Writes heartbeat diagnostics. |
+| `hooks/control_plane_watcher.ps1` | Snapshots watched enforcement paths (claude settings, hook scripts, policy, manifests, install origin) and compares before/after state. Exports `Get-ControlPlaneSnapshot`, `Compare-ControlPlaneSnapshots`, `Test-HookPresence`. |
+| `hooks/session_continuity.ps1` | Manages the append-only session ledger (`session/session-ledger-<session_id>.jsonl`). Writes three event types: `pretooluse_seen`, `gate_consumed`, `posttooluse_evidence_written`. Exports `Write-SessionLedgerEntry`, `Test-SessionContinuity`, `Get-SessionLedger`. |
+| `hooks/lib/HeliosIntegrityBridge.ps1` | Vendored copy of the Akashic bridge. Provides protected/mutable envelope snapshots, manifest comparison, session baseline management, and integrity evidence writing. |
+| `policy/command-policy.json` | Tier regex patterns, write indicator patterns, capability patterns (inline interpreter, dynamic eval, encoded execution, nested shell), control-plane path patterns, and exit-capture policy. |
+| `manifest/helios-envelope.json` | Protected-file manifest containing expected SHA-256 hashes for enforcement files. |
+| `manifest/helios-envelope.sha256` | SHA-256 sidecar hash of the manifest JSON. |
+| `posttooluse-errors/` | Heartbeat JSONL files and error records for PostToolUse execution diagnostics. Each invocation writes checkpoints: `started`, `parsed`, `identified`, `gate_matched`/`gate_orphan`, `classification_done`, `result_written`, `ledger_written`, `bridge_start`, `output_start`, `complete`. Errors are recorded at the checkpoint where they occur. |
+| `session/` | Append-only session ledger files. Runtime state, not committed to git. |
+| `pending/`, `inflight/`, `evidence/`, `blocked/` | Gate lifecycle directories. |
 
 ### Directory Integrity
 
@@ -454,7 +503,9 @@ On every invocation, `gate_check.ps1` checks that the gate root and all required
 
 ### Tier Classification
 
-The tier classifier loads patterns from `command-policy.json` at runtime and exports three functions: `Get-CommandTier`, `Test-ChainViolation`, and `Test-WriteIndicator`. Risk logic is not spread across memory or hooks; the policy file is the single operational source for tier patterns and write indicators.
+The tier classifier loads patterns from `command-policy.json` at runtime and exports three functions: `Get-CommandTier`, `Test-ChainViolation`, and `Test-WriteIndicator`. Risk logic is not spread across memory or hooks; the policy file is the single operational source for tier patterns, write indicators, and capability patterns.
+
+`Get-CommandTier` returns an expanded result that includes tier, matched pattern, capability flags (inline interpreter, dynamic eval, encoded execution, nested shell), reason codes, capability escalation status, and control-plane path references.
 
 If an `operating-catalog.json` exists in `templates/`, the classifier checks it after Tier 4 but before Tier 3, allowing project-specific pattern overrides with template suggestions.
 
@@ -695,6 +746,51 @@ That separation helps identify whether a model is being routed or blocked becaus
 
 For guardrail localization, do not give the tested model the full operator playbook at first. Feed one controlled lane at a time so the trigger can be isolated.
 
+## Phase 4.4 Status
+
+Phase 4.4 implemented the compound bypass awareness layer. Each component is live in the current runtime:
+
+| Component | Description | Status |
+|---|---|---|
+| Capability classification | Detects inline interpreters, dynamic eval, encoded execution, nested shells, control-plane path references. Escalates tier when capability patterns match. | Implemented |
+| Segment decomposition | Decomposes chained commands and validates declared `segments` against detected structure. Rejects mismatches. | Implemented |
+| Uniform evidence | Every PostToolUse result includes `detected_tier`, `capability_flags`, `policy_hash`, `hook_versions`, `enforcement_surface`, `segments_match`, `watched_path_diffs`, `settings_integrity_after`, `session_continuity_status`. | Implemented |
+| Control-plane watcher | Snapshots enforcement-relevant files before and after command execution. Reports diffs. | Implemented |
+| Session continuity ledger | Append-only ledger with `pretooluse_seen`, `gate_consumed`, `posttooluse_evidence_written` events. Detects gaps and hook identity changes. | Implemented |
+| Evidence-chain linkage | Gates must reference the previous evidence via `previous_correlation_id` or declare `new_chain: true` with reason. | Implemented |
+| Settings integrity | PostToolUse evidence includes hook presence status, hook commands, and settings hash. | Implemented |
+| PostToolUse heartbeat diagnostics | Every invocation writes checkpoint heartbeats. Errors are recorded at the checkpoint where they occur. | Implemented |
+| Maintenance rebaseline corridor | `helios_pretooluse.ps1` supports bounded internal rebaseline via `maintenance/rebaseline-request.json`. | Implemented |
+| Manifest/sidecar rebaseline | `tools/New-HeliosEnvelopeManifest.ps1` regenerates manifest and sidecar hash. | Implemented |
+
+## Capability Status
+
+| Capability | Helios | Akashic | Status |
+|---|---|---|---|
+| Command gate | Owns runtime enforcement | Installs/prepares runtime | Implemented |
+| SHA-256 command hash | Validates exact command | N/A | Implemented |
+| Protected-file manifest hash | Uses manifest/sidecar | Generates/verifies manifests | Implemented |
+| PostToolUse evidence | Writes runtime evidence | Can audit via tools | Implemented |
+| Capability classification | Owns classifier | N/A | Implemented |
+| Segment decomposition | Owns decomposer | N/A | Implemented |
+| Control-plane watcher | Owns live watcher | Verifies settings integrity | Implemented |
+| Session continuity | Writes ledger and evidence | Provides forensic audit | Implemented |
+| Installer | Consumes installed runtime | Owns PlanOnly/Prepare/Activate | Implemented |
+| Signatures | Reads authority fields only | Schema language exists | Not implemented |
+| File locks | Runtime target | Owns lock tooling | Tooling exists; active runtime locking deferred |
+
+### Hashes
+
+Implemented. `manifest/helios-envelope.json` contains protected-file SHA-256 hashes. `manifest/helios-envelope.sha256` is the manifest sidecar hash. Hashes prove byte-level drift against a known manifest. They do not prove human authorization by themselves.
+
+### Signatures
+
+Not implemented yet. The schemas support authority language (`authority_type`, `authorization_method`, `authorization_proof_present`, `authorization_proof_ref`), but cryptographic signing is deferred. Current authority is claim-based (`self_reported` or `tool_reported`). The sidecar is a SHA-256 hash, not a signature.
+
+### File Locks
+
+Lock tooling exists in Akashic. Backends are documented for Windows (`icacls`), Linux (`chattr`), macOS (`chflags`), and POSIX (`chmod`) fallback. Fixtures have been validated across platforms. Active Helios runtime locking remains deferred unless a later activation explicitly applies locks.
+
 ## Configuration Details
 
 ### How paths resolve
@@ -730,6 +826,13 @@ Before relying on Helios for real work, verify:
 - Tier 4 command is blocked even with a gate
 - wrapper-required command captures semantic `EXIT=<number>` through `PostToolUse`
 - `PostToolUseFailure` records failure even when `tool_response` is missing
+- inline interpreter command without `read_write_impact` is rejected (capability escalation)
+- declared segments that don't match decomposed structure are rejected
+- gate without `previous_correlation_id` or `new_chain: true` after existing evidence is rejected
+- PostToolUse `.result.json` contains `detected_tier`, `capability_flags`, `policy_hash`, `hook_versions`, `enforcement_surface`
+- command that modifies a watched file produces `watched_path_diffs` in evidence
+- PostToolUse heartbeat reaches `complete` checkpoint without error entries
+- session ledger records `pretooluse_seen`, `gate_consumed`, and `posttooluse_evidence_written` for each command
 
 ## License
 
