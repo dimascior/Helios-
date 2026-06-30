@@ -77,8 +77,8 @@ function Compare-ControlPlaneSnapshots {
     foreach ($key in $afterFiles.Keys) {
         $a = $afterFiles[$key]
         $b = $null
-        if ($beforeFiles -is [hashtable] -or $beforeFiles -is [ordered]) {
-            if ($beforeFiles.ContainsKey($key)) { $b = $beforeFiles[$key] }
+        if ($beforeFiles -is [System.Collections.IDictionary]) {
+            if ($beforeFiles.Contains($key)) { $b = $beforeFiles[$key] }
         } elseif ($beforeFiles -is [PSCustomObject]) {
             $prop = $beforeFiles.PSObject.Properties[$key]
             if ($prop) { $b = $prop.Value }
@@ -103,13 +103,13 @@ function Compare-ControlPlaneSnapshots {
 
     if ($beforeFiles -is [PSCustomObject]) {
         foreach ($prop in $beforeFiles.PSObject.Properties) {
-            if (-not $afterFiles.ContainsKey($prop.Name)) {
+            if (-not $afterFiles.Contains($prop.Name)) {
                 $diffs[$prop.Name] = @{ changed = $true; reason = 'removed_from_watched_set' }
             }
         }
-    } elseif ($beforeFiles -is [hashtable] -or $beforeFiles -is [ordered]) {
+    } elseif ($beforeFiles -is [System.Collections.IDictionary]) {
         foreach ($key in $beforeFiles.Keys) {
-            if (-not $afterFiles.ContainsKey($key)) {
+            if (-not $afterFiles.Contains($key)) {
                 $diffs[$key] = @{ changed = $true; reason = 'removed_from_watched_set' }
             }
         }
