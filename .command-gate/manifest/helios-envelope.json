@@ -1,7 +1,7 @@
 {
     "schema_version":  "helios-envelope.v1",
-    "created_utc":  "2026-06-30T02:28:21Z",
-    "rebaselined_by":  "phase-4.4-implementation",
+    "created_utc":  "2026-06-30T09:50:23Z",
+    "rebaselined_by":  "merge-phase44-final",
     "protected":  {
                       "description":  "Must not change during gated execution",
                       "paths":  [
@@ -15,11 +15,11 @@
                                     "manifest/helios-envelope.sha256"
                                 ],
                       "hashes":  {
+                                     "hooks/gate_check.ps1":  "564b1dc1dc03c690a589e6d91560e2626c31d6467181fa30e05e5dd125b0a850",
                                      "hooks/evidence_capture.ps1":  "ec7e6e610953ed7171a8e913f9b90a1c841658eeb6566e949340bc2aff20e9a8",
-                                     "hooks/gate_check.ps1":  "c61418b958cad2971ef80b324f5d56b94b17f2e7d92a4f5efc11288837a25442",
-                                     "hooks/helios_pretooluse.ps1":  "a30ae0fb83c527b05dc5e880bb9218e272c57390f98c8dfbbcb21fe4d151d7d5",
+                                     "hooks/tier_classifier.ps1":  "289f3158afe070327a967bcd786744931b2650651c4847ef06498b21c0dc95e2",
+                                     "hooks/helios_pretooluse.ps1":  "0a9708f3902611042d694d56f81a7f3b58eeb871f35d137091bf45ce7ec7fddc",
                                      "hooks/lib/HeliosIntegrityBridge.ps1":  "ba6c9576cee58c561d379565e533fdef6bbc6fbf709179a33299d51d859757c7",
-                                     "hooks/tier_classifier.ps1":  "c032dd9cf608ca11daf2374eae565917c5ba85792dbd9f0226fc5f46880ac055",
                                      "policy/command-policy.json":  "e373c3dcf11e7bf06a2221e816a9f669eb0f832e549f4b26a9b7bc28053373ac"
                                  }
                   },
@@ -32,5 +32,5 @@
                                  "blocked/"
                              ]
                 },
-    "note":  "Phase 4.4G: Added evidence chain linkage enforcement to gate_check.ps1 â€” requires previous_correlation_id or new_chain:true."
+    "note":  "Post-merge rebaseline with clean pretooluse (passthrough removed)"
 }

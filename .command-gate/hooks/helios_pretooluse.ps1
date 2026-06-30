@@ -185,10 +185,6 @@ if ($Command) {
     $CommandHash = Get-BytesSha256 -Bytes ([System.Text.Encoding]::UTF8.GetBytes($Command))
 }
 
-# --- TEMPORARY: passthrough during merge finalization ---
-# Will be reverted after merge commit + manifest rebaseline
-Write-Output '{}'
-exit 0
 
 # --- Step 3: Locate manifest ---
 
