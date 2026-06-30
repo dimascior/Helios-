@@ -6,6 +6,59 @@ $ErrorActionPreference = 'SilentlyContinue'
 
 $GateRoot = Split-Path $PSScriptRoot -Parent
 
+# --- Diagnostic heartbeat & error logging ---
+$script:HB_Sid = 'pre-init'
+$script:HB_Tuid = 'pre-init'
+$PostToolErrorDir = Join-Path $GateRoot 'posttooluse-errors'
+try {
+    if (-not (Test-Path $PostToolErrorDir)) {
+        New-Item -ItemType Directory -Path $PostToolErrorDir -Force -ErrorAction Stop | Out-Null
+    }
+} catch {}
+
+function Write-PostToolHeartbeat {
+    param([string]$Checkpoint, [string]$Detail)
+    try {
+        $entry = [ordered]@{
+            ts   = (Get-Date).ToUniversalTime().ToString('o')
+            sid  = $script:HB_Sid
+            tuid = $script:HB_Tuid
+            cp   = $Checkpoint
+        }
+        if ($Detail) { $entry['d'] = $Detail }
+        $line = ($entry | ConvertTo-Json -Compress) + "`n"
+        $day = (Get-Date).ToUniversalTime().ToString('yyyy-MM-dd')
+        $hbPath = Join-Path $PostToolErrorDir "heartbeat-$day.jsonl"
+        [System.IO.File]::AppendAllText($hbPath, $line, [System.Text.UTF8Encoding]::new($false))
+    } catch {}
+}
+
+function Save-PostToolError {
+    param([string]$RawPayload, [string]$Checkpoint, [string]$ErrorMessage)
+    try {
+        $ts = (Get-Date).ToUniversalTime().ToString('yyyyMMdd-HHmmss')
+        $payloadPath = Join-Path $PostToolErrorDir "$ts.error.json"
+        $wrapper = [ordered]@{
+            saved_utc  = (Get-Date).ToUniversalTime().ToString('o')
+            checkpoint = $Checkpoint
+            error      = $ErrorMessage
+            sid        = $script:HB_Sid
+            tuid       = $script:HB_Tuid
+        }
+        if ($RawPayload -and $RawPayload.Length -le 65536) {
+            $wrapper['payload'] = $RawPayload
+        } elseif ($RawPayload) {
+            $wrapper['payload_truncated'] = $RawPayload.Substring(0, 65536)
+            $wrapper['payload_bytes'] = $RawPayload.Length
+        }
+        [System.IO.File]::WriteAllText($payloadPath, ($wrapper | ConvertTo-Json -Depth 3), [System.Text.UTF8Encoding]::new($false))
+        $errFiles = Get-ChildItem $PostToolErrorDir -Filter '*.error.json' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending
+        if ($errFiles.Count -gt 20) {
+            $errFiles | Select-Object -Skip 20 | ForEach-Object { Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue }
+        }
+    } catch {}
+}
+
 function Get-Sha256 {
     param([string]$Text)
     $Bytes = [System.Text.Encoding]::UTF8.GetBytes($Text)
@@ -29,15 +82,19 @@ function Parse-ExitMarker {
 
 # --- MAIN ---
 
+Write-PostToolHeartbeat -Checkpoint 'started'
+
 $RawInput = $null
 try {
     $RawInput = [Console]::In.ReadToEnd()
 } catch {
+    Write-PostToolHeartbeat -Checkpoint 'stdin_fail' -Detail $_.Exception.Message
     Write-Output '{}'
     exit 0
 }
 
 if ([string]::IsNullOrWhiteSpace($RawInput)) {
+    Write-PostToolHeartbeat -Checkpoint 'skip' -Detail 'empty_stdin'
     Write-Output '{}'
     exit 0
 }
@@ -46,12 +103,17 @@ $Payload = $null
 try {
     $Payload = $RawInput | ConvertFrom-Json
 } catch {
+    Write-PostToolHeartbeat -Checkpoint 'skip' -Detail 'json_parse_fail'
+    Save-PostToolError -RawPayload $RawInput -Checkpoint 'json_parse' -ErrorMessage $_.Exception.Message
     Write-Output '{}'
     exit 0
 }
 
+Write-PostToolHeartbeat -Checkpoint 'parsed'
+
 $ToolName = $Payload.tool_name
 if ($ToolName -notin @('Bash', 'PowerShell')) {
+    Write-PostToolHeartbeat -Checkpoint 'skip' -Detail "tool=$ToolName"
     Write-Output '{}'
     exit 0
 }
@@ -62,6 +124,7 @@ if ($Payload.tool_input -and $Payload.tool_input.command) {
     $Command = $Payload.tool_input.command
 }
 if ([string]::IsNullOrWhiteSpace($Command)) {
+    Write-PostToolHeartbeat -Checkpoint 'skip' -Detail 'no_command'
     Write-Output '{}'
     exit 0
 }
@@ -69,6 +132,10 @@ if ([string]::IsNullOrWhiteSpace($Command)) {
 $Hash = Get-Sha256 $Command
 $ToolUseId = $Payload.tool_use_id
 $SessionId = $Payload.session_id
+$script:HB_Sid = if ($SessionId) { $SessionId.Substring(0, [Math]::Min(8, $SessionId.Length)) } else { 'none' }
+$script:HB_Tuid = if ($ToolUseId) { $ToolUseId } else { 'none' }
+
+Write-PostToolHeartbeat -Checkpoint 'identified' -Detail "event=$HookEvent"
 $PayloadCwd = $Payload.cwd
 $DurationMs = $Payload.duration_ms
 $NowUtc = (Get-Date).ToUniversalTime()
@@ -179,6 +246,9 @@ if ($IsOrphan) {
     $Hash12 = $Hash.Substring(0, 12)
     $CorrelationId = "orphan-$Ts-$Hash12"
     $GateFileName = 'none'
+    Write-PostToolHeartbeat -Checkpoint 'gate_orphan'
+} else {
+    Write-PostToolHeartbeat -Checkpoint 'gate_matched' -Detail "cid=$CorrelationId"
 }
 
 # --- Phase C: Uniform forensic classification ---
@@ -211,7 +281,9 @@ try {
         $ClassifierReasonCodes = @($TierResult.ReasonCodes)
         $WriteIndicatorMatched = [bool](Test-WriteIndicator $Command)
     }
-} catch {}
+} catch {
+    Write-PostToolHeartbeat -Checkpoint 'err_classifier' -Detail $_.Exception.Message
+}
 
 try {
     if (Test-Path $DecomposerPath) {
@@ -225,7 +297,9 @@ try {
         $SegmentsDetected = @($DecompResult.segments_detected)
         $FC_SegmentsMatch = [bool]$DecompResult.segments_match
     }
-} catch {}
+} catch {
+    Write-PostToolHeartbeat -Checkpoint 'err_decomposer' -Detail $_.Exception.Message
+}
 
 $FileSha = [System.Security.Cryptography.SHA256]::Create()
 try {
@@ -252,7 +326,11 @@ try {
             $HookVersions[$hf] = $hHash
         }
     }
-} catch {}
+} catch {
+    Write-PostToolHeartbeat -Checkpoint 'err_hookhash' -Detail $_.Exception.Message
+}
+
+Write-PostToolHeartbeat -Checkpoint 'classification_done' -Detail "tier=$DetectedTier"
 
 # --- Phase D: Control-plane snapshot ---
 $WatchedPathDiffs = $null
@@ -278,10 +356,14 @@ try {
                         $WatchedPathDiffs = $CPCompare.diffs
                     }
                 }
-            } catch {}
+            } catch {
+                Write-PostToolHeartbeat -Checkpoint 'err_cp_compare' -Detail $_.Exception.Message
+            }
         }
     }
-} catch {}
+} catch {
+    Write-PostToolHeartbeat -Checkpoint 'err_controlplane' -Detail $_.Exception.Message
+}
 
 # --- Phase E: Session continuity status ---
 $SessionContinuityStatus = $null
@@ -299,7 +381,9 @@ try {
             $SessionContinuityStatus = 'broken_after_this_command'
         }
     }
-} catch {}
+} catch {
+    Write-PostToolHeartbeat -Checkpoint 'err_continuity' -Detail $_.Exception.Message
+}
 
 $FilePrefix = "$DatePrefix-$CorrelationId"
 
@@ -343,7 +427,18 @@ $Result = [ordered]@{
 
 $ResultJson = $Result | ConvertTo-Json -Depth 5
 $ResultPath = Join-Path $EvidenceDir "$FilePrefix.result.json"
-try { [System.IO.File]::WriteAllText($ResultPath, $ResultJson, [System.Text.Encoding]::UTF8) } catch {}
+try {
+    [System.IO.File]::WriteAllText($ResultPath, $ResultJson, [System.Text.Encoding]::UTF8)
+    if (Test-Path $ResultPath) {
+        Write-PostToolHeartbeat -Checkpoint 'result_written' -Detail "cid=$CorrelationId"
+    } else {
+        Write-PostToolHeartbeat -Checkpoint 'result_write_nofile' -Detail $ResultPath
+        Save-PostToolError -RawPayload $RawInput -Checkpoint 'result_write_nofile' -ErrorMessage "WriteAllText returned but file not found: $ResultPath"
+    }
+} catch {
+    Write-PostToolHeartbeat -Checkpoint 'err_result_write' -Detail $_.Exception.Message
+    Save-PostToolError -RawPayload $RawInput -Checkpoint 'result_write' -ErrorMessage $_.Exception.Message
+}
 
 # Session ledger entry
 try {
@@ -361,8 +456,11 @@ try {
                 hook_presence_after = $hookPresAfterFlag
                 watched_path_changes = ($null -ne $WatchedPathDiffs -and $WatchedPathDiffs.Count -gt 0)
             }
+        Write-PostToolHeartbeat -Checkpoint 'ledger_written'
     }
-} catch {}
+} catch {
+    Write-PostToolHeartbeat -Checkpoint 'err_ledger' -Detail $_.Exception.Message
+}
 
 # Write .tool_response.json (full, capped at 1MB)
 if ($null -ne $ToolResponse) {
@@ -393,6 +491,7 @@ if (-not $IsOrphan -and $MatchedGateFile) {
 }
 
 # --- Integrity evidence (Helios bridge) ---
+Write-PostToolHeartbeat -Checkpoint 'bridge_start'
 $IntegrityWarning = $null
 try {
     $BridgePath = Join-Path $GateRoot 'hooks\lib\HeliosIntegrityBridge.ps1'
@@ -487,7 +586,12 @@ try {
             }
         }
     }
-} catch {}
+} catch {
+    Write-PostToolHeartbeat -Checkpoint 'err_bridge' -Detail $_.Exception.Message
+    Save-PostToolError -RawPayload $RawInput -Checkpoint 'bridge' -ErrorMessage $_.Exception.Message
+}
+
+Write-PostToolHeartbeat -Checkpoint 'output_start'
 
 # Output additionalContext
 $StatusWord = if ($Success) { 'succeeded' } else { 'failed' }
@@ -503,7 +607,7 @@ if ($WatchedPathDiffs -and $WatchedPathDiffs.Count -gt 0) {
     $changedKeys = @($WatchedPathDiffs.Keys) -join ', '
     $ContextMsg += " CONTROL PLANE: watched files changed: $changedKeys."
     if ($SettingsIntegrityAfter -and -not $SettingsIntegrityAfter['all_hooks_present']) {
-        $ContextMsg += " CONTROL PLANE: hook configuration removed — forcefield compromised."
+        $ContextMsg += " CONTROL PLANE: hook configuration removed -- forcefield compromised."
     }
 }
 $Out = @{
@@ -512,6 +616,8 @@ $Out = @{
         additionalContext = $ContextMsg
     }
 }
+
+Write-PostToolHeartbeat -Checkpoint 'complete'
 
 Write-Output ($Out | ConvertTo-Json -Depth 5 -Compress)
 exit 0

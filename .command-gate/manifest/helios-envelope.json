@@ -1,7 +1,7 @@
 {
     "schema_version":  "helios-envelope.v1",
-    "created_utc":  "2026-06-30T09:50:23Z",
-    "rebaselined_by":  "merge-phase44-final",
+    "created_utc":  "2026-06-30T15:42:47Z",
+    "rebaselined_by":  "posttooluse-diagnostic-instrumentation",
     "protected":  {
                       "description":  "Must not change during gated execution",
                       "paths":  [
@@ -15,11 +15,11 @@
                                     "manifest/helios-envelope.sha256"
                                 ],
                       "hashes":  {
+                                     "hooks/evidence_capture.ps1":  "677871a087e56543eeeb865116cb2a7e9713f1c31a2a8d8cad7cc9af0c1db077",
                                      "hooks/gate_check.ps1":  "564b1dc1dc03c690a589e6d91560e2626c31d6467181fa30e05e5dd125b0a850",
-                                     "hooks/evidence_capture.ps1":  "ec7e6e610953ed7171a8e913f9b90a1c841658eeb6566e949340bc2aff20e9a8",
-                                     "hooks/tier_classifier.ps1":  "289f3158afe070327a967bcd786744931b2650651c4847ef06498b21c0dc95e2",
                                      "hooks/helios_pretooluse.ps1":  "0a9708f3902611042d694d56f81a7f3b58eeb871f35d137091bf45ce7ec7fddc",
                                      "hooks/lib/HeliosIntegrityBridge.ps1":  "ba6c9576cee58c561d379565e533fdef6bbc6fbf709179a33299d51d859757c7",
+                                     "hooks/tier_classifier.ps1":  "289f3158afe070327a967bcd786744931b2650651c4847ef06498b21c0dc95e2",
                                      "policy/command-policy.json":  "e373c3dcf11e7bf06a2221e816a9f669eb0f832e549f4b26a9b7bc28053373ac"
                                  }
                   },
@@ -32,5 +32,5 @@
                                  "blocked/"
                              ]
                 },
-    "note":  "Post-merge rebaseline with clean pretooluse (passthrough removed)"
+    "note":  "Fixed em dash encoding issue on line 610 that caused parse failure."
 }
