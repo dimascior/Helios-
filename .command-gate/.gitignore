@@ -4,6 +4,11 @@ blocked/
 evidence/
 pending/
 inflight/
+session/
+maintenance/archives/
+
+# Local install evidence (machine-specific, not implementation)
+manifest/helios-install-origin.json
 
 # Keep directory structure via .gitkeep
 !pending/.gitkeep
