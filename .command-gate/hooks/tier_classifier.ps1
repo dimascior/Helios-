@@ -1,6 +1,6 @@
 # tier_classifier.ps1 — Dot-sourced by gate_check.ps1 and evidence_capture.ps1
-# Exports: Get-CommandTier, Test-ChainViolation, Test-WriteIndicator
-# Loads all patterns from command-policy.json at runtime.
+# Exports: Get-CommandTier, Test-ChainViolation, Test-WriteIndicator,
+#          Get-CommandCapabilities, Test-ControlPlanePath
 
 $script:GateRoot = Split-Path $PSScriptRoot -Parent
 $script:PolicyLoaded = $false
@@ -9,6 +9,8 @@ $script:Tier3Patterns = @()
 $script:Tier2Patterns = @()
 $script:Tier1Patterns = @()
 $script:WriteIndicators = @()
+$script:CapabilityPatterns = @{}
+$script:ControlPlanePaths = @()
 
 function Load-Policy {
     if ($script:PolicyLoaded) { return }
@@ -34,6 +36,12 @@ function Load-Policy {
         }
         if ($Policy.write_indicators) {
             $script:WriteIndicators = @($Policy.write_indicators)
+        }
+        if ($Policy.capability_patterns) {
+            $script:CapabilityPatterns = $Policy.capability_patterns
+        }
+        if ($Policy.control_plane_paths) {
+            $script:ControlPlanePaths = @($Policy.control_plane_paths)
         }
     } catch {}
     $script:PolicyLoaded = $true
@@ -74,13 +82,105 @@ function Test-WriteIndicator {
     return $false
 }
 
+function Get-CommandCapabilities {
+    param([string]$Command)
+    Load-Policy
+
+    $Flags = @{}
+    $ReasonCodes = @()
+    $HighestCapabilityTier = 0
+    $RequiresReadWriteImpact = $false
+    $RequiresStopConditions = $false
+    $MatchedCategories = @()
+
+    $CategoryNames = @()
+    if ($script:CapabilityPatterns -is [PSCustomObject]) {
+        $CategoryNames = @($script:CapabilityPatterns.PSObject.Properties.Name)
+    } elseif ($script:CapabilityPatterns -is [hashtable]) {
+        $CategoryNames = @($script:CapabilityPatterns.Keys)
+    }
+
+    foreach ($categoryName in $CategoryNames) {
+        $category = $script:CapabilityPatterns.$categoryName
+        $patterns = @()
+        if ($category.patterns) { $patterns = @($category.patterns) }
+
+        $matched = $false
+        foreach ($p in $patterns) {
+            if ($Command -match $p) {
+                $matched = $true
+                break
+            }
+        }
+
+        if ($matched) {
+            $Flags[$categoryName] = $true
+            $ReasonCodes += $categoryName.ToUpper()
+            $MatchedCategories += $categoryName
+
+            $catTier = 0
+            if ($category.tier) { $catTier = [int]$category.tier }
+            if ($catTier -gt $HighestCapabilityTier) { $HighestCapabilityTier = $catTier }
+
+            if ($category.requires_read_write_impact -eq $true) { $RequiresReadWriteImpact = $true }
+            if ($category.requires_stop_conditions -eq $true) { $RequiresStopConditions = $true }
+        } else {
+            $Flags[$categoryName] = $false
+        }
+    }
+
+    return @{
+        Flags                   = $Flags
+        ReasonCodes             = $ReasonCodes
+        HighestCapabilityTier   = $HighestCapabilityTier
+        RequiresReadWriteImpact = $RequiresReadWriteImpact
+        RequiresStopConditions  = $RequiresStopConditions
+        MatchedCategories       = $MatchedCategories
+        HasCapability           = ($MatchedCategories.Count -gt 0)
+    }
+}
+
+function Test-ControlPlanePath {
+    param([string]$Command)
+    Load-Policy
+
+    $MatchedPaths = @()
+    foreach ($p in $script:ControlPlanePaths) {
+        if ($Command -match $p) {
+            $MatchedPaths += $p
+        }
+    }
+
+    return @{
+        HasControlPlaneRef = ($MatchedPaths.Count -gt 0)
+        MatchedPaths       = $MatchedPaths
+    }
+}
+
 function Get-CommandTier {
     param([string]$Command)
     Load-Policy
 
+    $CapabilityResult = Get-CommandCapabilities $Command
+    $ControlPlaneResult = Test-ControlPlanePath $Command
+
+    $ReasonCodes = [System.Collections.ArrayList]@($CapabilityResult.ReasonCodes)
+    if ($ControlPlaneResult.HasControlPlaneRef) {
+        [void]$ReasonCodes.Add('CONTROL_PLANE_PATH_REFERENCED')
+    }
+
     foreach ($p in $script:Tier4Patterns) {
         if ($Command -match $p) {
-            return @{ Tier = 4; Name = 'forbidden'; MatchedPattern = $p; MatchedTemplate = $null }
+            return @{
+                Tier               = 4
+                Name               = 'forbidden'
+                MatchedPattern     = $p
+                MatchedTemplate    = $null
+                CapabilityFlags    = $CapabilityResult.Flags
+                ReasonCodes        = @($ReasonCodes)
+                CapabilityEscalated = $false
+                ControlPlanePaths  = $ControlPlaneResult.MatchedPaths
+            }
         }
     }
 
@@ -100,11 +200,25 @@ function Get-CommandTier {
                 if (-not $EntryName) { $EntryName = $entry.family }
 
                 if ($Command -match $Pattern) {
+                    $CatalogTier = [int]$entry.tier
+                    $Escalated = $false
+                    $FinalTier = $CatalogTier
+
+                    if ($CapabilityResult.HighestCapabilityTier -gt $CatalogTier) {
+                        $FinalTier = $CapabilityResult.HighestCapabilityTier
+                        $Escalated = $true
+                        [void]$ReasonCodes.Add("CAPABILITY_ESCALATION_FROM_$($CatalogTier)_TO_$($FinalTier)")
+                    }
+
                     return @{
-                        Tier = [int]$entry.tier
-                        Name = $EntryName
-                        MatchedPattern = $Pattern
-                        MatchedTemplate = $TemplateId
+                        Tier               = $FinalTier
+                        Name               = $EntryName
+                        MatchedPattern     = $Pattern
+                        MatchedTemplate    = $TemplateId
+                        CapabilityFlags    = $CapabilityResult.Flags
+                        ReasonCodes        = @($ReasonCodes)
+                        CapabilityEscalated = $Escalated
+                        ControlPlanePaths  = $ControlPlaneResult.MatchedPaths
                     }
                 }
             }
@@ -113,21 +227,78 @@ function Get-CommandTier {
 
     foreach ($p in $script:Tier3Patterns) {
         if ($Command -match $p) {
-            return @{ Tier = 3; Name = 'modifying'; MatchedPattern = $p; MatchedTemplate = $null }
+            return @{
+                Tier               = 3
+                Name               = 'modifying'
+                MatchedPattern     = $p
+                MatchedTemplate    = $null
+                CapabilityFlags    = $CapabilityResult.Flags
+                ReasonCodes        = @($ReasonCodes)
+                CapabilityEscalated = $false
+                ControlPlanePaths  = $ControlPlaneResult.MatchedPaths
+            }
         }
     }
 
     foreach ($p in $script:Tier2Patterns) {
         if ($Command -match $p) {
-            return @{ Tier = 2; Name = 'remote_admin'; MatchedPattern = $p; MatchedTemplate = $null }
+            return @{
+                Tier               = 2
+                Name               = 'remote_admin'
+                MatchedPattern     = $p
+                MatchedTemplate    = $null
+                CapabilityFlags    = $CapabilityResult.Flags
+                ReasonCodes        = @($ReasonCodes)
+                CapabilityEscalated = $false
+                ControlPlanePaths  = $ControlPlaneResult.MatchedPaths
+            }
         }
     }
 
     foreach ($p in $script:Tier1Patterns) {
         if ($Command -match $p) {
-            return @{ Tier = 1; Name = 'diagnostic'; MatchedPattern = $p; MatchedTemplate = $null }
+            $Escalated = $false
+            $FinalTier = 1
+
+            if ($CapabilityResult.HighestCapabilityTier -gt 1) {
+                $FinalTier = $CapabilityResult.HighestCapabilityTier
+                $Escalated = $true
+                [void]$ReasonCodes.Add("CAPABILITY_ESCALATION_FROM_1_TO_$FinalTier")
+            }
+
+            return @{
+                Tier               = $FinalTier
+                Name               = if ($Escalated) { 'capability_escalated' } else { 'diagnostic' }
+                MatchedPattern     = $p
+                MatchedTemplate    = $null
+                CapabilityFlags    = $CapabilityResult.Flags
+                ReasonCodes        = @($ReasonCodes)
+                CapabilityEscalated = $Escalated
+                ControlPlanePaths  = $ControlPlaneResult.MatchedPaths
+            }
         }
     }
 
-    return @{ Tier = 0; Name = 'routine'; MatchedPattern = $null; MatchedTemplate = $null }
+    # Tier 0 default — but capability patterns can escalate
+    $Escalated = $false
+    $FinalTier = 0
+    $FinalName = 'routine'
+
+    if ($CapabilityResult.HighestCapabilityTier -gt 0) {
+        $FinalTier = $CapabilityResult.HighestCapabilityTier
+        $Escalated = $true
+        $FinalName = 'capability_escalated'
+        [void]$ReasonCodes.Add("CAPABILITY_ESCALATION_FROM_0_TO_$FinalTier")
+    }
+
+    return @{
+        Tier               = $FinalTier
+        Name               = $FinalName
+        MatchedPattern     = $null
+        MatchedTemplate    = $null
+        CapabilityFlags    = $CapabilityResult.Flags
+        ReasonCodes        = @($ReasonCodes)
+        CapabilityEscalated = $Escalated
+        ControlPlanePaths  = $ControlPlaneResult.MatchedPaths
+    }
 }

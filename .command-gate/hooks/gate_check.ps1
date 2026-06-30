@@ -266,6 +266,31 @@ function Invoke-GateValidation {
             }
         }
 
+        # Capability-flag enforcement: hidden execution power requires read_write_impact
+        if ($TierResult.CapabilityFlags) {
+            $HasCapability = $false
+            foreach ($flagKey in $TierResult.CapabilityFlags.Keys) {
+                if ($TierResult.CapabilityFlags[$flagKey] -eq $true) {
+                    $HasCapability = $true
+                    break
+                }
+            }
+            if ($HasCapability) {
+                $rwi = $gate.read_write_impact
+                if ($null -eq $rwi -or $null -eq $rwi.writes) {
+                    $capNames = @($TierResult.CapabilityFlags.Keys | Where-Object { $TierResult.CapabilityFlags[$_] -eq $true })
+                    $Reasons += "capability detection ($($capNames -join ', ')) requires read_write_impact.writes"
+                } else {
+                    $writes = @($rwi.writes)
+                    if ($writes.Count -eq 0) {
+                        $Reasons += 'capability detection active but read_write_impact.writes is empty'
+                    } elseif ($writes.Count -eq 1 -and $writes[0] -eq 'none') {
+                        $Reasons += 'capability detection active but read_write_impact.writes is ["none"]'
+                    }
+                }
+            }
+        }
+
         if ($Reasons.Count -eq 0) {
             $MatchedGate = $gate
             $MatchedGateFile = $gateFile
@@ -461,16 +486,67 @@ function Invoke-GateValidation {
         }
     }
 
-    # Step 5: Chain validation on the matched gate (after identity confirmed)
+    # Step 5: Chain validation and segment decomposition
+    . (Join-Path $GateRoot 'hooks\command_decomposer.ps1')
+
+    $DeclaredSegments = @()
+    if ($MatchedGate.segments) { $DeclaredSegments = @($MatchedGate.segments) }
+    $Decomposition = Get-CommandDecomposition -Command $Command -DeclaredSegments $DeclaredSegments
+
     if (-not $IsWrapperMode) {
         $IsChained = Test-ChainViolation $Command
         if ($IsChained) {
-            if ($MatchedGate.multi_command -ne $true -or $null -eq $MatchedGate.segments -or @($MatchedGate.segments).Count -eq 0) {
+            if ($MatchedGate.multi_command -ne $true -or $DeclaredSegments.Count -eq 0) {
                 $Reason = "UNDECLARED CHAINING: command contains chained operators (;, &&, ||, |) but the gate does not declare multi_command:true with segments. SHA256: $Hash"
                 Write-BlockedRecord $Command $Hash $Reason -1
                 return @{ action = 'deny'; reason = $Reason; hash = $Hash; tier = -1 }
             }
+            if (-not $Decomposition.segments_match) {
+                $detectedList = ($Decomposition.segments_detected | ForEach-Object { "'$_'" }) -join ', '
+                $declaredList = ($DeclaredSegments | ForEach-Object { "'$_'" }) -join ', '
+                $Reason = "SEGMENT MISMATCH: declared segments do not match decomposed command structure. Detected: [$detectedList] Declared: [$declaredList]. SHA256: $Hash"
+                Write-BlockedRecord $Command $Hash $Reason $DetectedTier
+                return @{ action = 'deny'; reason = $Reason; hash = $Hash; tier = $DetectedTier }
+            }
         }
+
+        if ($Decomposition.ambiguous_parse -and $DetectedTier -lt 1) {
+            $rwi = $MatchedGate.read_write_impact
+            if ($null -eq $rwi -or $null -eq $rwi.writes) {
+                $Reason = "AMBIGUOUS COMMAND: cannot safely decompose; requires tier >= 1 or explicit read_write_impact. SHA256: $Hash"
+                Write-BlockedRecord $Command $Hash $Reason $DetectedTier
+                return @{ action = 'deny'; reason = $Reason; hash = $Hash; tier = $DetectedTier }
+            }
+        }
+    }
+
+    # Step 5b: Evidence chain linkage
+    $SessionIdForChain = $Payload.session_id
+    if ($SessionIdForChain) {
+        $SCPathChain = Join-Path $GateRoot 'hooks\session_continuity.ps1'
+        try {
+            if (Test-Path $SCPathChain) {
+                . $SCPathChain
+                $ledger = Get-SessionLedger -GateRoot $GateRoot -SessionId $SessionIdForChain
+                $lastEvidence = $null
+                for ($li = $ledger.Count - 1; $li -ge 0; $li--) {
+                    if ($ledger[$li].event_type -eq 'posttooluse_evidence_written') {
+                        $lastEvidence = $ledger[$li]
+                        break
+                    }
+                }
+                if ($null -ne $lastEvidence) {
+                    $hasPrevCorr = ($null -ne $MatchedGate.previous_correlation_id -and $MatchedGate.previous_correlation_id.Length -gt 0)
+                    $hasNewChain = ($MatchedGate.new_chain -eq $true)
+                    if (-not $hasPrevCorr -and -not $hasNewChain) {
+                        $prevCorr = $lastEvidence.correlation_id
+                        $Reason = "CHAIN LINKAGE: previous evidence exists (correlation_id: $prevCorr) but gate declares neither previous_correlation_id nor new_chain:true. SHA256: $Hash"
+                        Write-BlockedRecord $Command $Hash $Reason $DetectedTier
+                        return @{ action = 'deny'; reason = $Reason; hash = $Hash; tier = $DetectedTier }
+                    }
+                }
+            }
+        } catch {}
     }
 
     # Step 6: Valid gate — move to inflight
@@ -483,10 +559,15 @@ function Invoke-GateValidation {
     Move-Item -Path $MatchedGateFile.FullName -Destination $InflightPath -Force
 
     return @{
-        action = 'allow'
-        hash = $Hash
-        tier = $DetectedTier
-        correlation_id = $MatchedGate.correlation_id
+        action              = 'allow'
+        hash                = $Hash
+        tier                = $DetectedTier
+        correlation_id      = $MatchedGate.correlation_id
+        capability_flags    = $TierResult.CapabilityFlags
+        reason_codes        = $TierResult.ReasonCodes
+        capability_escalated = $TierResult.CapabilityEscalated
+        control_plane_paths = $TierResult.ControlPlanePaths
+        decomposition       = $Decomposition
     }
 }
 

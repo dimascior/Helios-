@@ -428,16 +428,61 @@ if ($ProtectedResult.verdict -ne 'CLEAN') {
 
 # --- Step 13: Write before snapshot ---
 
+$ControlPlaneSnapshot = $null
+$CPWatcherPath = Join-Path $GateRoot 'hooks\control_plane_watcher.ps1'
+try {
+    if (Test-Path $CPWatcherPath) {
+        . $CPWatcherPath
+        $ControlPlaneSnapshot = Get-ControlPlaneSnapshot -GateRoot $GateRoot
+    }
+} catch {}
+
+# --- Step 13b: Session continuity check ---
+$ContinuityBreak = $false
+$SCPath = Join-Path $GateRoot 'hooks\session_continuity.ps1'
+try {
+    if (Test-Path $SCPath) {
+        . $SCPath
+        $LedgerEntries = Get-SessionLedger -GateRoot $GateRoot -SessionId $SessionId
+        if ($LedgerEntries.Count -gt 0) {
+            $lastEntry = $LedgerEntries[$LedgerEntries.Count - 1]
+            if ($lastEntry.event_type -eq 'pretooluse_seen' -or $lastEntry.event_type -eq 'gate_consumed') {
+                $ContinuityBreak = $true
+            }
+        }
+
+        $policyHashForLedger = $null
+        try {
+            $sha = [System.Security.Cryptography.SHA256]::Create()
+            $plPath = Join-Path $GateRoot 'policy\command-policy.json'
+            if (Test-Path $plPath) {
+                $plBytes = [System.IO.File]::ReadAllBytes($plPath)
+                $policyHashForLedger = ($sha.ComputeHash($plBytes) | ForEach-Object { $_.ToString('x2') }) -join ''
+            }
+        } catch {}
+
+        Write-SessionLedgerEntry -GateRoot $GateRoot -SessionId $SessionId `
+            -EventType 'pretooluse_seen' -Data @{
+                command_sha256     = $CommandHash
+                tool_use_id        = $ToolUseId
+                policy_hash        = $policyHashForLedger
+                continuity_break   = $ContinuityBreak
+            }
+    }
+} catch {}
+
 Write-HeliosIntegrityEvidence -GateRoot $GateRoot -SessionId $SessionId -ToolUseId $ToolUseId `
     -EvidenceType 'before' -Data @{
-        timestamp_utc    = (Get-Date).ToUniversalTime().ToString('o')
-        session_id       = $SessionId
-        tool_use_id      = $ToolUseId
-        command_sha256   = $CommandHash
-        protected        = $Snapshot.protected
-        mutable          = $Snapshot.mutable
-        context          = $Snapshot.context
-        integrity_status = 'CLEAN'
+        timestamp_utc          = (Get-Date).ToUniversalTime().ToString('o')
+        session_id             = $SessionId
+        tool_use_id            = $ToolUseId
+        command_sha256         = $CommandHash
+        protected              = $Snapshot.protected
+        mutable                = $Snapshot.mutable
+        context                = $Snapshot.context
+        integrity_status       = 'CLEAN'
+        control_plane_snapshot = $ControlPlaneSnapshot
+        continuity_break       = $ContinuityBreak
     } | Out-Null
 
 # --- Step 14: Load tier_classifier and gate_check (both now verified) ---
@@ -474,6 +519,19 @@ Write-IntegrityDecision -SessionId $SessionId -ToolUseId $ToolUseId -Data @{
     session_id       = $SessionId
     tool_use_id      = $ToolUseId
 }
+
+try {
+    if (Get-Command Write-SessionLedgerEntry -ErrorAction SilentlyContinue) {
+        Write-SessionLedgerEntry -GateRoot $GateRoot -SessionId $SessionId `
+            -EventType 'gate_consumed' -Data @{
+                correlation_id = $GateResult.correlation_id
+                command_sha256 = $GateResult.hash
+                declared_tier  = $GateResult.tier
+                tool_use_id    = $ToolUseId
+                verdict        = $DecisionVerdict
+            }
+    }
+} catch {}
 
 # --- Step 16: Exit with appropriate behavior ---
 

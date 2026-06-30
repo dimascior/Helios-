@@ -181,33 +181,188 @@ if ($IsOrphan) {
     $GateFileName = 'none'
 }
 
+# --- Phase C: Uniform forensic classification ---
+$DetectedTier = 0
+$DetectedTierName = 'routine'
+$FC_MatchedPattern = $null
+$CapabilityEscalated = $false
+$CapabilityFlags = @{}
+$ClassifierReasonCodes = @()
+$WriteIndicatorMatched = $false
+$PolicyHash = $null
+$HookVersions = @{}
+$EnforcementSurface = 'shell-gated'
+$SegmentsDeclared = @()
+$SegmentsDetected = @()
+$FC_SegmentsMatch = $true
+
+$ClassifierPath = Join-Path $PSScriptRoot 'tier_classifier.ps1'
+$DecomposerPath = Join-Path $PSScriptRoot 'command_decomposer.ps1'
+
+try {
+    if (Test-Path $ClassifierPath) {
+        . $ClassifierPath
+        $TierResult = Get-CommandTier $Command
+        $DetectedTier = $TierResult.Tier
+        $DetectedTierName = $TierResult.Name
+        $FC_MatchedPattern = $TierResult.MatchedPattern
+        $CapabilityEscalated = [bool]$TierResult.CapabilityEscalated
+        $CapabilityFlags = $TierResult.CapabilityFlags
+        $ClassifierReasonCodes = @($TierResult.ReasonCodes)
+        $WriteIndicatorMatched = [bool](Test-WriteIndicator $Command)
+    }
+} catch {}
+
+try {
+    if (Test-Path $DecomposerPath) {
+        . $DecomposerPath
+        $DeclaredSegs = @()
+        if ($null -ne $g -and $g.segments) {
+            $DeclaredSegs = @($g.segments)
+        }
+        $DecompResult = Get-CommandDecomposition -Command $Command -DeclaredSegments $DeclaredSegs
+        $SegmentsDeclared = $DeclaredSegs
+        $SegmentsDetected = @($DecompResult.segments_detected)
+        $FC_SegmentsMatch = [bool]$DecompResult.segments_match
+    }
+} catch {}
+
+$FileSha = [System.Security.Cryptography.SHA256]::Create()
+try {
+    $FC_PolicyPath = Join-Path $GateRoot 'policy\command-policy.json'
+    if (Test-Path $FC_PolicyPath) {
+        $pBytes = [System.IO.File]::ReadAllBytes($FC_PolicyPath)
+        $PolicyHash = ($FileSha.ComputeHash($pBytes) | ForEach-Object { $_.ToString('x2') }) -join ''
+    }
+} catch {}
+
+$HookFiles = @(
+    'hooks\helios_pretooluse.ps1',
+    'hooks\gate_check.ps1',
+    'hooks\tier_classifier.ps1',
+    'hooks\evidence_capture.ps1',
+    'hooks\command_decomposer.ps1'
+)
+try {
+    foreach ($hf in $HookFiles) {
+        $hfPath = Join-Path $GateRoot $hf
+        if (Test-Path $hfPath) {
+            $hBytes = [System.IO.File]::ReadAllBytes($hfPath)
+            $hHash = ($FileSha.ComputeHash($hBytes) | ForEach-Object { $_.ToString('x2') }) -join ''
+            $HookVersions[$hf] = $hHash
+        }
+    }
+} catch {}
+
+# --- Phase D: Control-plane snapshot ---
+$WatchedPathDiffs = $null
+$SettingsIntegrityAfter = $null
+$WatcherPath = Join-Path $PSScriptRoot 'control_plane_watcher.ps1'
+try {
+    if (Test-Path $WatcherPath) {
+        . $WatcherPath
+        $AfterCPSnapshot = Get-ControlPlaneSnapshot -GateRoot $GateRoot
+        $SettingsIntegrityAfter = $AfterCPSnapshot.hook_presence
+
+        $BeforeEviPath = Join-Path $GateRoot "evidence\integrity\sessions\$SessionId\commands\$ToolUseId.before.json"
+        if (Test-Path $BeforeEviPath) {
+            try {
+                $BeforeEvi = Get-Content $BeforeEviPath -Raw | ConvertFrom-Json
+                if ($BeforeEvi.control_plane_snapshot) {
+                    $BeforeCP = @{
+                        files         = $BeforeEvi.control_plane_snapshot.files
+                        hook_presence = $BeforeEvi.control_plane_snapshot.hook_presence
+                    }
+                    $CPCompare = Compare-ControlPlaneSnapshots -Before $BeforeCP -After $AfterCPSnapshot
+                    if ($CPCompare.has_changes) {
+                        $WatchedPathDiffs = $CPCompare.diffs
+                    }
+                }
+            } catch {}
+        }
+    }
+} catch {}
+
+# --- Phase E: Session continuity status ---
+$SessionContinuityStatus = $null
+$SCPath = Join-Path $PSScriptRoot 'session_continuity.ps1'
+try {
+    if (Test-Path $SCPath) {
+        . $SCPath
+        $hookPresAfter = $true
+        if ($SettingsIntegrityAfter) {
+            $hookPresAfter = [bool]$SettingsIntegrityAfter['all_hooks_present']
+        }
+        if ($hookPresAfter) {
+            $SessionContinuityStatus = 'continuous'
+        } else {
+            $SessionContinuityStatus = 'broken_after_this_command'
+        }
+    }
+} catch {}
+
 $FilePrefix = "$DatePrefix-$CorrelationId"
 
 # Write .result.json
 $Result = [ordered]@{
-    correlation_id   = $CorrelationId
-    tool_use_id      = $ToolUseId
-    session_id       = $SessionId
-    command          = $Command
-    command_sha256   = $Hash
-    gate_file        = $GateFileName
-    hook_event       = $HookEvent
-    executed_utc     = $NowUtc.ToString('o')
-    duration_ms      = $DurationMs
-    cwd              = $PayloadCwd
-    exit_code        = $ExitCode
-    exit_code_source = $ExitCodeSource
-    interrupted      = $Interrupted
-    output_preview   = $OutputPreview
-    output_bytes     = $OutputBytes
-    success          = $Success
-    fields_found     = $FieldsFound
-    fields_missing   = $FieldsMissing
+    correlation_id          = $CorrelationId
+    tool_use_id             = $ToolUseId
+    session_id              = $SessionId
+    command                 = $Command
+    command_sha256          = $Hash
+    gate_file               = $GateFileName
+    hook_event              = $HookEvent
+    executed_utc            = $NowUtc.ToString('o')
+    duration_ms             = $DurationMs
+    cwd                     = $PayloadCwd
+    exit_code               = $ExitCode
+    exit_code_source        = $ExitCodeSource
+    interrupted             = $Interrupted
+    output_preview          = $OutputPreview
+    output_bytes            = $OutputBytes
+    success                 = $Success
+    fields_found            = $FieldsFound
+    fields_missing          = $FieldsMissing
+    detected_tier           = $DetectedTier
+    detected_tier_name      = $DetectedTierName
+    matched_pattern         = $FC_MatchedPattern
+    capability_escalated    = $CapabilityEscalated
+    capability_flags        = $CapabilityFlags
+    classifier_reason_codes = $ClassifierReasonCodes
+    write_indicator_matched = $WriteIndicatorMatched
+    policy_hash             = $PolicyHash
+    hook_versions           = $HookVersions
+    enforcement_surface     = $EnforcementSurface
+    segments_declared       = $SegmentsDeclared
+    segments_detected       = $SegmentsDetected
+    segments_match          = $FC_SegmentsMatch
+    watched_path_diffs      = $WatchedPathDiffs
+    settings_integrity_after = $SettingsIntegrityAfter
+    session_continuity_status = $SessionContinuityStatus
 }
 
 $ResultJson = $Result | ConvertTo-Json -Depth 5
 $ResultPath = Join-Path $EvidenceDir "$FilePrefix.result.json"
 try { [System.IO.File]::WriteAllText($ResultPath, $ResultJson, [System.Text.Encoding]::UTF8) } catch {}
+
+# Session ledger entry
+try {
+    if (Get-Command Write-SessionLedgerEntry -ErrorAction SilentlyContinue) {
+        $hookPresAfterFlag = $true
+        if ($SettingsIntegrityAfter) {
+            $hookPresAfterFlag = [bool]$SettingsIntegrityAfter['all_hooks_present']
+        }
+        Write-SessionLedgerEntry -GateRoot $GateRoot -SessionId $SessionId `
+            -EventType 'posttooluse_evidence_written' -Data @{
+                correlation_id      = $CorrelationId
+                tool_use_id         = $ToolUseId
+                command_sha256      = $Hash
+                exit_code           = $ExitCode
+                hook_presence_after = $hookPresAfterFlag
+                watched_path_changes = ($null -ne $WatchedPathDiffs -and $WatchedPathDiffs.Count -gt 0)
+            }
+    }
+} catch {}
 
 # Write .tool_response.json (full, capped at 1MB)
 if ($null -ne $ToolResponse) {
@@ -343,6 +498,13 @@ if ($null -ne $ExitCode) {
 $ContextMsg = "[EVIDENCE:$CorrelationId] Command $StatusWord.$ExitInfo Compare EXPECTED from the gate vs ACTUAL output before creating the next gate."
 if ($IntegrityWarning) {
     $ContextMsg += $IntegrityWarning
+}
+if ($WatchedPathDiffs -and $WatchedPathDiffs.Count -gt 0) {
+    $changedKeys = @($WatchedPathDiffs.Keys) -join ', '
+    $ContextMsg += " CONTROL PLANE: watched files changed: $changedKeys."
+    if ($SettingsIntegrityAfter -and -not $SettingsIntegrityAfter['all_hooks_present']) {
+        $ContextMsg += " CONTROL PLANE: hook configuration removed — forcefield compromised."
+    }
 }
 $Out = @{
     hookSpecificOutput = @{
