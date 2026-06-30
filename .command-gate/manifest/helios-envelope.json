@@ -1,0 +1,36 @@
+{
+    "schema_version":  "helios-envelope.v1",
+    "created_utc":  "2026-06-30T02:28:21Z",
+    "rebaselined_by":  "phase-4.4-implementation",
+    "protected":  {
+                      "description":  "Must not change during gated execution",
+                      "paths":  [
+                                    "hooks/gate_check.ps1",
+                                    "hooks/evidence_capture.ps1",
+                                    "hooks/tier_classifier.ps1",
+                                    "hooks/helios_pretooluse.ps1",
+                                    "hooks/lib/HeliosIntegrityBridge.ps1",
+                                    "policy/command-policy.json",
+                                    "manifest/helios-envelope.json",
+                                    "manifest/helios-envelope.sha256"
+                                ],
+                      "hashes":  {
+                                     "hooks/evidence_capture.ps1":  "ec7e6e610953ed7171a8e913f9b90a1c841658eeb6566e949340bc2aff20e9a8",
+                                     "hooks/gate_check.ps1":  "c61418b958cad2971ef80b324f5d56b94b17f2e7d92a4f5efc11288837a25442",
+                                     "hooks/helios_pretooluse.ps1":  "a30ae0fb83c527b05dc5e880bb9218e272c57390f98c8dfbbcb21fe4d151d7d5",
+                                     "hooks/lib/HeliosIntegrityBridge.ps1":  "ba6c9576cee58c561d379565e533fdef6bbc6fbf709179a33299d51d859757c7",
+                                     "hooks/tier_classifier.ps1":  "c032dd9cf608ca11daf2374eae565917c5ba85792dbd9f0226fc5f46880ac055",
+                                     "policy/command-policy.json":  "e373c3dcf11e7bf06a2221e816a9f669eb0f832e549f4b26a9b7bc28053373ac"
+                                 }
+                  },
+    "mutable":  {
+                    "description":  "Must change as part of gate lifecycle",
+                    "dirs":  [
+                                 "pending/",
+                                 "inflight/",
+                                 "evidence/",
+                                 "blocked/"
+                             ]
+                },
+    "note":  "Phase 4.4G: Added evidence chain linkage enforcement to gate_check.ps1 â€” requires previous_correlation_id or new_chain:true."
+}
