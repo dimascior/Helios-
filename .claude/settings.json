@@ -7,7 +7,7 @@
           {
             "type": "command",
             "shell": "powershell",
-            "command": "& (Join-Path $PWD '.command-gate\\hooks\\gate_check.ps1')",
+            "command": "& (Join-Path $PWD '.command-gate\\hooks\\helios_pretooluse.ps1')",
             "timeout": 15
           }
         ]
