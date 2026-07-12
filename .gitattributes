@@ -1,0 +1,6 @@
+# HELIOS/1 runtime source must check out byte-identical to the locked deployed runtime
+# on every machine. -text disables all EOL conversion for these exact files.
+.command-gate/hooks/helios_pretooluse.ps1 -text
+.command-gate/hooks/gate_check.ps1 -text
+.command-gate/hooks/session_continuity.ps1 -text
+.command-gate/schema/helios-gate.schema.json -text
