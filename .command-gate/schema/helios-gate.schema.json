@@ -1,0 +1,156 @@
+{
+  "schema_doc_version": "helios-gate-schema.v1",
+  "gate_schema_version": "command-gate.v1",
+  "description": "Canonical machine-readable description of the Helios command-gate contract. The validator (hooks/gate_check.ps1) reads required base fields from this file, and the virtual schema responder (hooks/helios_pretooluse.ps1) projects bounded slices of it over the HELIOS/1 wire protocol. Tier-required fields are live policy data in policy/command-policy.json and are merged into responses at answer time - they are deliberately not duplicated here.",
+  "sections": {
+    "versions": {
+      "gate_documents": "command-gate.v1 - the schema_version value every gate JSON in pending/ must declare, enforced by exact match; any other value (including '1.0' and 'helios-gate.v1') is denied with this canonical value in the response",
+      "schema_document": "helios-gate-schema.v1 - the version of this file",
+      "wire_protocol": "HELIOS/1 - every virtual response and real denial begins with a sentinel line 'HELIOS/1 VIRTUAL <op> <OK|ERROR>' or 'HELIOS/1 DENY <REASON_CODE>' followed by one line of compact JSON",
+      "reason_codes": ["GATE_REQUIRED", "GATE_REJECTED", "INTEGRITY_DRIFT", "UNRECOGNIZED_EXECUTION_TOOL", "UNSUPPORTED_ARGV_SHAPE", "TIER4_FORBIDDEN"]
+    },
+    "virtual": {
+      "operations": ["schema", "scaffold", "version", "capabilities"],
+      "grammar": [
+        "helios gate schema",
+        "helios gate schema --format json",
+        "helios gate schema --tier <0-3> --shell <bash|powershell>",
+        "helios gate schema --tier <0-3> --shell <bash|powershell> --example",
+        "helios gate schema --section <versions|virtual|fields|enums|tiers|segments|chain|impact|wrapper|ttl|scaffold|examples>",
+        "helios gate scaffold",
+        "helios gate scaffold --blocked-id <id>",
+        "helios gate version",
+        "helios gate capabilities"
+      ],
+      "rules": "Exact grammar only. Pipes, redirection, chaining, inline interpreters, dynamic evaluation, encoded execution, and unrecognized arguments are rejected. These strings are protocol tokens intercepted by the verified front controller after integrity verification; nothing executes through PATH, no gate is consumed, and a 'HELIOS/1 VIRTUAL <op> OK' response is the answer - the command must not be retried.",
+      "size_budget": "Responses target 4096 bytes, hard cap 8192; bare 'helios gate schema' returns only an index; every response carries 'truncated' and, when more data exists, a 'next' hint with the exact follow-up command"
+    },
+    "fields": {
+      "required_base_fields": [
+        "schema_version",
+        "correlation_id",
+        "created_utc",
+        "expires_utc",
+        "command",
+        "command_sha256",
+        "working_directory",
+        "shell",
+        "risk_tier",
+        "exit_capture",
+        "multi_command",
+        "segments",
+        "need",
+        "expected",
+        "actual_means",
+        "next_logic",
+        "approval_boundary"
+      ],
+      "types_and_meaning": {
+        "schema_version": "string - exactly 'command-gate.v1'",
+        "correlation_id": "string - unique id for this gate; becomes the evidence correlation id and the chain predecessor for the next command",
+        "created_utc": "string - ISO-8601 UTC timestamp (e.g. 2026-07-11T00:00:00Z)",
+        "expires_utc": "string - ISO-8601 UTC; expired gates are rejected",
+        "command": "string - the EXACT command text the tool will execute, byte-for-byte",
+        "command_sha256": "string - lowercase hex SHA-256 of the UTF-8 bytes of command",
+        "working_directory": "string - must equal the hook-observed effective working directory at retry time (for Codex this is the shell_command workdir)",
+        "shell": "string - canonical shell; see enums.shell",
+        "risk_tier": "integer 0-3 - must be >= the tier Helios detects for the command",
+        "exit_capture": "string - see enums.exit_capture; mode 'suffix' requires the command to end with an approved suffix; 'not_applicable' additionally requires exit_capture_reason from the approved list",
+        "multi_command": "boolean - true when the command decomposes into more than one segment",
+        "segments": "string[] - exact decomposition; see section 'segments'",
+        "need": "string - semantic: why this command is needed (agent-authored, never scaffolded)",
+        "expected": "string - semantic: what output/effect is expected",
+        "actual_means": "string - semantic: what the command actually does mechanically",
+        "next_logic": "string - semantic: what happens next depending on the result",
+        "approval_boundary": "string - free text; see enums.approval_boundary_note",
+        "stop_conditions": "string[] - required at tier >= 2 (live policy): conditions under which execution must be aborted",
+        "read_write_impact": "object - required at tier 3 and under write/capability detection; see section 'impact'",
+        "exit_capture_reason": "string - required when exit_capture='not_applicable'; see enums.exit_capture_reason",
+        "previous_correlation_id": "string - chain linkage; see section 'chain'",
+        "new_chain": "boolean - chain linkage; see section 'chain'",
+        "wrapped_command": "string - wrapper identity; see section 'wrapper'",
+        "wrapped_command_sha256": "string - wrapper identity; see section 'wrapper'",
+        "wrapper_reason": "string - wrapper identity; see section 'wrapper'"
+      }
+    },
+    "enums": {
+      "shell": ["bash", "powershell"],
+      "exit_capture": ["suffix", "wrapper_required", "not_applicable"],
+      "exit_capture_reason": ["pure_output", "no_exit_code_semantic", "interactive_tool", "background_process"],
+      "exit_capture_suffixes": {
+        "bash": ["; echo EXIT=$?"],
+        "powershell": ["; Write-Host \"EXIT=$LASTEXITCODE\"", "; echo \"EXIT=$LASTEXITCODE\""]
+      },
+      "approval_boundary_note": "approval_boundary is validated as non-empty free text, not an enum. Recommended vocabulary: describe what the command may touch and what it must not (e.g. 'read-only diagnostics; no writes, no network')."
+    },
+    "tiers": {
+      "0": "routine - no pattern match; gate still required",
+      "1": "diagnostic - read-only inspection commands (ls, cat, grep, Get-*)",
+      "2": "remote/admin - ssh, sudo, service control, UI automation",
+      "3": "modifying - file mutation, git push/reset, package installs, process control",
+      "4": "forbidden - unconditionally blocked; CANNOT be authorized by any gate",
+      "tier_required_fields": "LIVE POLICY DATA - resolved from policy/command-policy.json (tier_required_fields) at answer time and merged into schema responses; not duplicated in this file",
+      "capability_escalation": "Inline interpreters (bash -c, python -c, -Command), dynamic eval (eval, Invoke-Expression), and encoded execution escalate to tier 3 and require read_write_impact + stop_conditions; nested shell/command substitution ($(...), backticks) escalates to tier 2 and requires read_write_impact"
+    },
+    "segments": {
+      "separators": [";", "&&", "||", "|"],
+      "contract": "Any command containing a separator outside quotes must declare multi_command:true and segments[] listing every segment in order, trimmed, duplicates included. Declared segments must exactly equal the detected decomposition or the gate is rejected with SEGMENT MISMATCH.",
+      "quote_awareness": "Separators inside single-quoted or double-quoted spans are not split; a backslash-escaped quote does not toggle quoting. Limitations (honest): PowerShell backtick escapes and here-strings are not modeled - here-string markers set ambiguous_parse, which at tier 0 requires explicit read_write_impact.",
+      "wrapper_exemption": "Commands with exit_capture='wrapper_required' are exempt from chain detection; the wrapper identity fields protect against hidden actions instead"
+    },
+    "chain": {
+      "fields": ["previous_correlation_id", "new_chain"],
+      "contract": "Once a session has prior executable evidence (a posttooluse_evidence_written ledger entry), every subsequent gate must declare exactly one of: previous_correlation_id (the correlation id of the most recent executed command - provided as last_correlation_id in denial responses) or new_chain:true (explicitly starting an unrelated chain). They are mutually exclusive statements of chain intent.",
+      "virtual_note": "virtual_op_answered ledger events are continuity-neutral: they never become the chain predecessor and never require linkage"
+    },
+    "impact": {
+      "shape": { "reads": ["string"], "writes": ["string"] },
+      "contract": "read_write_impact must be an object with reads[] and writes[] arrays (string forms are rejected). Required at tier 3, when a write indicator matches the command, or when a capability flag (inline execution, dynamic eval, encoded execution, nested shell) is active. writes:['none'] is valid ONLY when nothing requires write disclosure; under write/capability detection it is rejected.",
+      "ttl_note": "List concrete paths or path classes, not vague categories"
+    },
+    "wrapper": {
+      "when": "exit_capture='wrapper_required' - the command wraps the real operation so the true exit code is captured as output (EXIT=<code>) while the tool itself exits 0, guaranteeing PostToolUse evidence",
+      "validators": "LIVE POLICY DATA - wrapper_validators in policy/command-policy.json define per-shell must_contain and must_end_with strings the full command must satisfy",
+      "identity_fields": {
+        "wrapped_command": "the semantic command being measured; must appear literally inside the full command",
+        "wrapped_command_sha256": "SHA-256 of wrapped_command (UTF-8); recomputed and compared at validation",
+        "wrapper_reason": "why the wrapper is needed (typically: nonzero exit is expected diagnostic output that must be captured)"
+      }
+    },
+    "ttl": {
+      "contract": "created_utc and expires_utc are ISO-8601 UTC. Expired gates are rejected. Gates are single-use: on successful validation the gate file moves from pending/ to inflight/ and cannot authorize a second execution. Recommended TTL: at most 24 hours; scaffolds suggest 1 hour."
+    },
+    "scaffold": {
+      "mechanical_fields_prefilled": ["schema_version", "command", "command_sha256", "working_directory", "shell", "risk_tier", "multi_command", "segments", "created_utc", "expires_utc"],
+      "semantic_fields_never_prefilled": ["need", "expected", "actual_means", "next_logic", "stop_conditions", "read_write_impact", "approval_boundary", "previous_correlation_id", "new_chain"],
+      "contract": "The scaffold is informational only: it never writes to pending/, never authorizes a command, never consumes a gate, never executes a process. The requesting agent must author every semantic field and choose its chain intent explicitly, then write the completed gate to pending/ itself.",
+      "binding": "Scaffolds resolve only session-bound blocked records no older than 30 minutes belonging to the requesting session; legacy records without a session id return STALE_RECORD",
+      "destination_discovery": "Every successful scaffold response also returns the absolute gate_root, pending_directory, suggested_gate_filename (literal <correlation-id>.gate.json), suggested_gate_path, and a write_instruction, so an agent that has never seen the Helios root learns exactly where to write the completed gate. These paths derive solely from the front controller's own gate root and cannot be redirected by blocked-record contents; write the completed gate to suggested_gate_path, never relative to the current working directory. Real GATE_REQUIRED denials also carry gate_root, pending_directory, scaffold_command, and suggested_gate_path when a scaffold is available."
+    },
+    "examples": {
+      "tier_1_bash": {
+        "schema_version": "command-gate.v1",
+        "correlation_id": "example-diag-001",
+        "created_utc": "2026-07-11T00:00:00Z",
+        "expires_utc": "2026-07-11T01:00:00Z",
+        "command": "ls /tmp; echo EXIT=$?",
+        "command_sha256": "<sha256 of the exact command text>",
+        "working_directory": "C:\\Users\\dimas\\Desktop\\CODEAPI",
+        "shell": "bash",
+        "risk_tier": 1,
+        "exit_capture": "suffix",
+        "multi_command": true,
+        "segments": ["ls /tmp", "echo EXIT=$?"],
+        "new_chain": true,
+        "need": "<why>",
+        "expected": "<what output>",
+        "actual_means": "<what it does>",
+        "next_logic": "<what happens next>",
+        "approval_boundary": "read-only listing; no writes"
+      },
+      "tier_3_powershell_delta": {
+        "note": "tier 3 additionally requires (live policy): stop_conditions[] and read_write_impact {reads:[], writes:[]}; write indicators make writes:['none'] invalid; commands must still end with an approved exit-capture suffix for the declared shell"
+      }
+    }
+  }
+}

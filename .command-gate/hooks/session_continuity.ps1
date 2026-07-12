@@ -1,5 +1,18 @@
 # session_continuity.ps1 — Dot-sourced by helios_pretooluse.ps1 and evidence_capture.ps1
 # Exports: Write-SessionLedgerEntry, Test-SessionContinuity, Get-SessionLedger
+#
+# Event-type semantics:
+#   pretooluse_seen              — a real command reached the gate (execution intent)
+#   gate_consumed                — a gate decision was recorded for that command
+#   posttooluse_evidence_written — the command executed and evidence landed;
+#                                  its correlation_id is the executable chain predecessor
+#   virtual_op_answered          — the front controller answered a HELIOS/1 virtual
+#                                  introspection request. CONTINUITY-NEUTRAL by
+#                                  contract: it is not command execution, consumes
+#                                  no gate, produces no PostToolUse evidence, never
+#                                  creates a continuity break or gap, and never
+#                                  becomes or replaces the executable chain
+#                                  predecessor.
 
 $script:Utf8NoBomLedger = New-Object System.Text.UTF8Encoding($false)
 
@@ -102,6 +115,11 @@ function Test-SessionContinuity {
                 }
                 $pendingPre = $null
                 $pendingGate = $null
+            }
+            'virtual_op_answered' {
+                # Continuity-neutral by contract: does not open or close a
+                # command window, does not count as execution or evidence, and
+                # must not disturb pendingPre/pendingGate tracking.
             }
         }
     }

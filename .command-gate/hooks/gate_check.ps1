@@ -2,12 +2,24 @@
 # When invoked standalone: reads stdin, loads tier_classifier, runs validation.
 # When dot-sourced by helios_pretooluse.ps1: provides Invoke-GateValidation only.
 # Exit 0 + {} = allow (normal permission flow). Exit 2 + stderr = block.
+#
+# Contract sources (single ownership, no drift):
+#   - required base fields:  schema/helios-gate.schema.json (canonical, protected)
+#   - tier-required fields:  policy/command-policy.json (live policy, protected)
+# Both fail CLOSED when missing, malformed, or empty — no hardcoded fallback.
+# Denials speak the HELIOS/1 wire grammar: a sentinel line followed by one line
+# of compact JSON carrying machine-readable recovery (schema_command,
+# scaffold_command, blocked_id, last_correlation_id).
 
 $ErrorActionPreference = 'Stop'
 
 $GateRoot = Split-Path $PSScriptRoot -Parent
 
 $RequiredDirs = @('pending', 'inflight', 'evidence', 'blocked', 'policy', 'templates', 'manifest')
+
+$script:HeliosGateSchemaVersion = 'command-gate.v1'
+$script:HeliosSchemaDocVersion  = 'helios-gate-schema.v1'
+$script:HeliosSchemaRelPath     = 'schema/helios-gate.schema.json'
 
 function Deny {
     param([string]$Reason)
@@ -27,22 +39,6 @@ function DenyFatal {
     Deny $Reason
 }
 
-function Write-BlockedRecord {
-    param([string]$Command, [string]$Hash, [string]$Reason, [int]$Tier)
-    try {
-        $Ts = (Get-Date).ToString('yyyyMMdd-HHmmss')
-        $Record = @{
-            timestamp_utc = (Get-Date).ToUniversalTime().ToString('o')
-            command = $Command
-            command_sha256 = $Hash
-            tier = $Tier
-            reason = $Reason
-        }
-        $Path = Join-Path $GateRoot "blocked\$Ts-$($Hash.Substring(0,12)).blocked.json"
-        [System.IO.File]::WriteAllText($Path, ($Record | ConvertTo-Json -Depth 3), [System.Text.Encoding]::UTF8)
-    } catch {}
-}
-
 function Get-Sha256 {
     param([string]$Text)
     $Bytes = [System.Text.Encoding]::UTF8.GetBytes($Text)
@@ -51,24 +47,164 @@ function Get-Sha256 {
     return ($HashBytes | ForEach-Object { $_.ToString('x2') }) -join ''
 }
 
+function Get-HeliosSchemaSha256 {
+    # Prefer the manifest-recorded hash handed over by the front controller;
+    # standalone mode hashes the file directly (informational).
+    if ($script:HeliosWireContext -and $script:HeliosWireContext.schema_sha256) {
+        return $script:HeliosWireContext.schema_sha256
+    }
+    try {
+        $p = Join-Path $GateRoot ($script:HeliosSchemaRelPath -replace '/', '\')
+        if (Test-Path $p) {
+            $bytes = [System.IO.File]::ReadAllBytes($p)
+            $sha = [System.Security.Cryptography.SHA256]::Create()
+            return ($sha.ComputeHash($bytes) | ForEach-Object { $_.ToString('x2') }) -join ''
+        }
+    } catch {}
+    return $null
+}
+
+function Get-RequiredBaseFields {
+    # Canonical schema is the single owner of the base-field list. Fail closed.
+    $schemaPath = Join-Path $GateRoot ($script:HeliosSchemaRelPath -replace '/', '\')
+    if (-not (Test-Path $schemaPath)) {
+        throw "canonical schema missing: $($script:HeliosSchemaRelPath)"
+    }
+    $doc = $null
+    try {
+        $doc = Get-Content $schemaPath -Raw | ConvertFrom-Json
+    } catch {
+        throw "canonical schema unparseable: $($_.Exception.Message)"
+    }
+    $fields = @($doc.sections.fields.required_base_fields)
+    if ($fields.Count -lt 1) {
+        throw 'canonical schema malformed: required_base_fields empty'
+    }
+    return $fields
+}
+
 function Get-TierRequiredFields {
+    # Live policy is the single owner of tier requirements. Fail closed.
     param([int]$Tier)
     $PolicyPath = Join-Path $GateRoot 'policy\command-policy.json'
-    if (Test-Path $PolicyPath) {
-        try {
-            $Policy = Get-Content $PolicyPath -Raw | ConvertFrom-Json
-            $Key = [string][Math]::Min($Tier, 3)
-            $Fields = $Policy.tier_required_fields.$Key
-            if ($Fields) { return @($Fields) }
-        } catch {}
+    if (-not (Test-Path $PolicyPath)) {
+        throw 'command-policy.json missing'
     }
-    $Fallback = @{
-        0 = @('need', 'expected', 'actual_means', 'next_logic')
-        1 = @('need', 'expected', 'actual_means', 'next_logic')
-        2 = @('need', 'expected', 'actual_means', 'next_logic', 'stop_conditions')
-        3 = @('need', 'expected', 'actual_means', 'next_logic', 'stop_conditions', 'read_write_impact')
+    $Policy = Get-Content $PolicyPath -Raw | ConvertFrom-Json
+    $Key = [string][Math]::Min($Tier, 3)
+    $Fields = $Policy.tier_required_fields.$Key
+    if (-not $Fields) {
+        throw "tier_required_fields['$Key'] missing from live policy"
     }
-    return $Fallback[[Math]::Min($Tier, 3)]
+    return @($Fields)
+}
+
+function Get-LastExecutableCorrelationId {
+    # Root is passed explicitly by callers so this never depends on an ambient
+    # $GateRoot that may resolve differently across scopes (front controller vs
+    # standalone vs test harness).
+    param([string]$SessionId, [string]$Root = $GateRoot)
+    if (-not $SessionId) { return $null }
+    try {
+        if (-not (Get-Command Get-SessionLedger -ErrorAction SilentlyContinue)) {
+            $scPath = Join-Path $Root 'hooks\session_continuity.ps1'
+            if (Test-Path $scPath) { . $scPath }
+        }
+        if (Get-Command Get-SessionLedger -ErrorAction SilentlyContinue) {
+            $ledger = @(Get-SessionLedger -GateRoot $Root -SessionId $SessionId)
+            for ($li = $ledger.Count - 1; $li -ge 0; $li--) {
+                if ($ledger[$li].event_type -eq 'posttooluse_evidence_written') {
+                    return $ledger[$li].correlation_id
+                }
+            }
+        }
+    } catch {}
+    return $null
+}
+
+function Write-HeliosBlockedRecord {
+    # Atomic: build -> serialize -> write tmp -> File.Move rename. Only a
+    # successful rename may be advertised as a scaffoldable blocked_id.
+    param([Parameter(Mandatory)]$Record, [Parameter(Mandatory)][string]$Hash, [string]$ToolUseId)
+
+    $ts = (Get-Date).ToString('yyyyMMdd-HHmmss')
+    $id = "$ts-$($Hash.Substring(0, 12))"
+    $blockedDir = Join-Path $GateRoot 'blocked'
+    $final = Join-Path $blockedDir "$id.blocked.json"
+    $tmp = $null
+    try {
+        $tmp = Join-Path $blockedDir (".tmp-" + [guid]::NewGuid().ToString('N'))
+        [System.IO.File]::WriteAllText($tmp, ($Record | ConvertTo-Json -Depth 6), [System.Text.Encoding]::UTF8)
+        if (Test-Path $final) {
+            # Collision grammar: append a sanitized, bounded tool-use suffix.
+            $suffix = ("$ToolUseId" -replace '[^A-Za-z0-9_-]', '')
+            if ($suffix.Length -gt 24) { $suffix = $suffix.Substring($suffix.Length - 24) }
+            if (-not $suffix) { $suffix = [guid]::NewGuid().ToString('N').Substring(0, 8) }
+            $id = "$id-$suffix"
+            $final = Join-Path $blockedDir "$id.blocked.json"
+            if (Test-Path $final) { throw "blocked record collision persists: $id" }
+        }
+        [System.IO.File]::Move($tmp, $final)
+        return @{ ok = $true; blocked_id = $id; path = $final }
+    } catch {
+        try { if ($tmp -and (Test-Path $tmp)) { Remove-Item $tmp -Force -ErrorAction SilentlyContinue } } catch {}
+        return @{ ok = $false; error = "$($_.Exception.Message)"; code = 'PERSISTENCE_ERROR' }
+    }
+}
+
+function New-HeliosDenyReason {
+    # Builds the two-line HELIOS/1 denial envelope used as the deny reason.
+    param(
+        [Parameter(Mandatory)][string]$Code,
+        [Parameter(Mandatory)][string]$Message,
+        [string]$Hash,
+        $Tier,
+        [string]$Shell,
+        [string]$Cwd,
+        $BlockedResult,
+        [string]$LastCorrelationId,
+        $Extra
+    )
+    $body = [ordered]@{
+        code                = $Code
+        message             = $Message
+        command_sha256      = $Hash
+        detected_tier       = $Tier
+        shell               = $Shell
+        working_directory   = $Cwd
+        gate_schema_version = $script:HeliosGateSchemaVersion
+        schema_doc_version  = $script:HeliosSchemaDocVersion
+        schema_sha256       = (Get-HeliosSchemaSha256)
+        last_correlation_id = $LastCorrelationId
+    }
+    $tierArg = 0
+    if ($null -ne $Tier -and "$Tier" -match '^\d+$') { $tierArg = [Math]::Min([Math]::Max([int]$Tier, 0), 3) }
+    $shellArg = 'bash'
+    if ($Shell -in @('bash', 'powershell')) { $shellArg = $Shell }
+    $body.schema_command = "helios gate schema --tier $tierArg --shell $shellArg"
+
+    if ($null -ne $BlockedResult -and $BlockedResult.ok) {
+        $body.blocked_id = $BlockedResult.blocked_id
+        $body.scaffold_available = $true
+        $body.scaffold_command = "helios gate scaffold --blocked-id $($BlockedResult.blocked_id)"
+        # Destination discovery: recover from this denial alone, without prior
+        # knowledge of the absolute Helios root. Paths derive solely from the
+        # front controller's own $GateRoot, never from request/record contents.
+        $body.gate_root = "$GateRoot"
+        $pendingDir = Join-Path $GateRoot 'pending'
+        $body.pending_directory = "$pendingDir"
+        $body.suggested_gate_path = (Join-Path $pendingDir '<correlation-id>.gate.json')
+    } else {
+        $body.scaffold_available = $false
+        if ($null -ne $BlockedResult -and $BlockedResult.error) {
+            $body.persistence_error = $BlockedResult.code
+        }
+    }
+    if ($Extra) {
+        foreach ($k in $Extra.Keys) { $body[$k] = $Extra[$k] }
+    }
+    $json = $body | ConvertTo-Json -Depth 6 -Compress
+    return "HELIOS/1 DENY $Code`n$json"
 }
 
 # --- Gate Validation Function ---
@@ -91,8 +227,15 @@ function Invoke-GateValidation {
         return @{ action = 'fatal'; message = 'No command field in tool_input' }
     }
 
+    # Effective working directory: tool_input.workdir when present (Codex),
+    # otherwise the hook payload cwd. Used for gate identity, blocked records,
+    # scaffolds, and retry matching.
     $Cwd = $Payload.cwd
+    if ($Payload.tool_input.PSObject.Properties['workdir'] -and $Payload.tool_input.workdir) {
+        $Cwd = "$($Payload.tool_input.workdir)"
+    }
     $ToolUseId = $Payload.tool_use_id
+    $SessionId = $Payload.session_id
     $Shell = $ToolName.ToLower()
 
     # Directory integrity check
@@ -114,20 +257,79 @@ function Invoke-GateValidation {
         }
     }
 
+    # Step 0: Contract sources (fail closed — no fallback copies)
+    $RequiredBaseFields = $null
+    try {
+        $RequiredBaseFields = Get-RequiredBaseFields
+    } catch {
+        return @{ action = 'fatal'; message = "INTEGRITY: $($_.Exception.Message)" }
+    }
+
     # Step 1: Compute hash (needed for gate matching and blocked records)
     $Hash = Get-Sha256 $Command
+
+    # Chain context (also surfaced in denial envelopes for recovery)
+    $LastCorrelationId = Get-LastExecutableCorrelationId -SessionId $SessionId -Root $GateRoot
 
     # Step 2: Tier 4 check (before gate matching — unconditional block)
     $TierResult = Get-CommandTier $Command
     if ($TierResult.Tier -eq 4) {
-        $Reason = "TIER 4 FORBIDDEN: pattern '$($TierResult.MatchedPattern)' matched. This command is unconditionally blocked."
-        Write-BlockedRecord $Command $Hash $Reason 4
+        $Message = "TIER 4 FORBIDDEN: pattern '$($TierResult.MatchedPattern)' matched. This command is unconditionally blocked and cannot be authorized by any gate."
+        $record = [ordered]@{
+            timestamp_utc     = (Get-Date).ToUniversalTime().ToString('o')
+            command           = $Command
+            command_sha256    = $Hash
+            detected_tier     = 4
+            session_id        = $SessionId
+            tool_use_id       = $ToolUseId
+            tool_name         = $ToolName
+            shell             = $Shell
+            working_directory = $Cwd
+            reason_code       = 'TIER4_FORBIDDEN'
+            reason            = $Message
+        }
+        $blockedResult = Write-HeliosBlockedRecord -Record $record -Hash $Hash -ToolUseId $ToolUseId
+        $Reason = New-HeliosDenyReason -Code 'TIER4_FORBIDDEN' -Message $Message -Hash $Hash -Tier 4 `
+            -Shell $Shell -Cwd $Cwd -BlockedResult $null -LastCorrelationId $LastCorrelationId
         return @{ action = 'deny'; reason = $Reason; hash = $Hash; tier = 4 }
     }
 
     $DetectedTier = $TierResult.Tier
-    $RequiredFields = Get-TierRequiredFields $DetectedTier
+    $RequiredFields = $null
+    try {
+        $RequiredFields = Get-TierRequiredFields $DetectedTier
+    } catch {
+        return @{ action = 'fatal'; message = "INTEGRITY: $($_.Exception.Message)" }
+    }
     $HasWriteIndicator = Test-WriteIndicator $Command
+
+    # Shared builder for the enriched blocked record
+    $NewBlockedRecord = {
+        param([string]$ReasonCode, [string]$ReasonText, $Diag)
+        $r = [ordered]@{
+            timestamp_utc       = (Get-Date).ToUniversalTime().ToString('o')
+            command             = $Command
+            command_sha256      = $Hash
+            detected_tier       = $DetectedTier
+            session_id          = $SessionId
+            tool_use_id         = $ToolUseId
+            tool_name           = $ToolName
+            shell               = $Shell
+            working_directory   = $Cwd
+            matched_category    = $TierResult.Name
+            matched_template    = $TierResult.MatchedTemplate
+            reason_code         = $ReasonCode
+            reason              = $ReasonText
+            last_correlation_id = $LastCorrelationId
+        }
+        if ($Diag) {
+            $r.closest_gate_file = $Diag.file
+            $r.closest_match_type = $Diag.match_type
+            $r.reject_reasons = @($Diag.reasons)
+            $r.expected_schema_hint = @{ required_base_fields = $RequiredBaseFields }
+        }
+        return $r
+    }
 
     # Step 3: Scan pending/ for candidate gate by identity, while collecting diagnostics
     $PendingDir = Join-Path $GateRoot 'pending'
@@ -135,26 +337,6 @@ function Invoke-GateValidation {
     $MatchedGate = $null
     $MatchedGateFile = $null
     $CandidateDiagnostics = @()
-
-    $RequiredBaseFields = @(
-        'schema_version',
-        'correlation_id',
-        'created_utc',
-        'expires_utc',
-        'command',
-        'command_sha256',
-        'working_directory',
-        'shell',
-        'risk_tier',
-        'exit_capture',
-        'multi_command',
-        'segments',
-        'need',
-        'expected',
-        'actual_means',
-        'next_logic',
-        'approval_boundary'
-    )
 
     foreach ($gateFile in (Get-ChildItem $PendingDir -Filter '*.gate.json' -ErrorAction SilentlyContinue)) {
         try {
@@ -183,6 +365,11 @@ function Invoke-GateValidation {
 
         if (-not $ShaMatch) {
             $Reasons += "command_sha256 mismatch: gate='$($gate.command_sha256)' expected='$Hash'"
+        }
+
+        # Exact schema-version enforcement (canonical value; self-correcting denial)
+        if ("$($gate.schema_version)" -ne $script:HeliosGateSchemaVersion) {
+            $Reasons += "schema_version mismatch: expected '$($script:HeliosGateSchemaVersion)', found '$($gate.schema_version)'"
         }
 
         if ($gate.working_directory -ne $Cwd) {
@@ -322,57 +509,20 @@ function Invoke-GateValidation {
             $DiagLines = @(
                 "GATE REJECTED: closest gate $($BestDiag.file) matched $($BestDiag.match_type) but failed validation:"
             )
-
             foreach ($r in $BestDiag.reasons) {
                 $DiagLines += "- $r"
             }
+            $Message = $DiagLines -join "`n"
 
-            $HasSchemaIssue = $false
-            foreach ($r in $BestDiag.reasons) {
-                if ($r -like 'missing base fields*' -or
-                    $r -like 'missing tier-required fields*' -or
-                    $r -like 'field name error*' -or
-                    $r -like 'risk_tier is missing*' -or
-                    $r -like 'expires_utc is missing*') {
-                    $HasSchemaIssue = $true
-                    break
-                }
-            }
+            $record = & $NewBlockedRecord 'GATE_REJECTED' $Message $BestDiag
+            $blockedResult = Write-HeliosBlockedRecord -Record $record -Hash $Hash -ToolUseId $ToolUseId
 
-            if ($HasSchemaIssue) {
-                $DiagLines += ''
-                $DiagLines += 'Required base fields: schema_version, correlation_id, created_utc, expires_utc, command, command_sha256, working_directory, shell, risk_tier, exit_capture, multi_command, segments, need, expected, actual_means, next_logic, approval_boundary'
-            }
-
-            $Reason = $DiagLines -join "`n"
-
-            $BlockedRecord = @{
-                timestamp_utc = $NowUtc.ToString('o')
-                command = $Command
-                command_sha256 = $Hash
-                detected_tier = $DetectedTier
-                closest_gate_file = $BestDiag.file
-                closest_match_type = $BestDiag.match_type
-                reject_reasons = @($BestDiag.reasons)
-                reason = $Reason
-            }
-
-            if ($HasSchemaIssue) {
-                $BlockedRecord.expected_schema_hint = @{
-                    required_base_fields = $RequiredBaseFields
-                }
-            }
-
-            try {
-                $Ts = (Get-Date).ToString('yyyyMMdd-HHmmss')
-                $Path = Join-Path $GateRoot "blocked\$Ts-$($Hash.Substring(0,12)).blocked.json"
-                [System.IO.File]::WriteAllText(
-                    $Path,
-                    ($BlockedRecord | ConvertTo-Json -Depth 6),
-                    [System.Text.Encoding]::UTF8
-                )
-            } catch {}
-
+            $Reason = New-HeliosDenyReason -Code 'GATE_REJECTED' -Message $Message -Hash $Hash `
+                -Tier $DetectedTier -Shell $Shell -Cwd $Cwd -BlockedResult $blockedResult `
+                -LastCorrelationId $LastCorrelationId -Extra ([ordered]@{
+                    closest_gate = $BestDiag.file
+                    reject_reasons = @($BestDiag.reasons)
+                })
             return @{ action = 'deny'; reason = $Reason; hash = $Hash; tier = $DetectedTier }
         }
 
@@ -383,8 +533,13 @@ function Invoke-GateValidation {
             $TemplateSuggestion = " Category: $($TierResult.Name)."
         }
 
-        $Reason = "GATE REQUIRED: No valid gate found in pending/ for this command. Tier: $DetectedTier. SHA256: $Hash.$TemplateSuggestion"
-        Write-BlockedRecord $Command $Hash $Reason $DetectedTier
+        $Message = "GATE REQUIRED: No valid gate found in pending/ for this command. Tier: $DetectedTier. SHA256: $Hash.$TemplateSuggestion"
+        $record = & $NewBlockedRecord 'GATE_REQUIRED' $Message $null
+        $blockedResult = Write-HeliosBlockedRecord -Record $record -Hash $Hash -ToolUseId $ToolUseId
+
+        $Reason = New-HeliosDenyReason -Code 'GATE_REQUIRED' -Message $Message -Hash $Hash `
+            -Tier $DetectedTier -Shell $Shell -Cwd $Cwd -BlockedResult $blockedResult `
+            -LastCorrelationId $LastCorrelationId
         return @{ action = 'deny'; reason = $Reason; hash = $Hash; tier = $DetectedTier }
     }
 
@@ -408,6 +563,16 @@ function Invoke-GateValidation {
         }
     } catch {}
 
+    $DenyRejected = {
+        param([string]$ReasonText)
+        $record = & $NewBlockedRecord 'GATE_REJECTED' $ReasonText $null
+        $blockedResult = Write-HeliosBlockedRecord -Record $record -Hash $Hash -ToolUseId $ToolUseId
+        $Reason = New-HeliosDenyReason -Code 'GATE_REJECTED' -Message $ReasonText -Hash $Hash `
+            -Tier $DetectedTier -Shell $Shell -Cwd $Cwd -BlockedResult $blockedResult `
+            -LastCorrelationId $LastCorrelationId
+        return @{ action = 'deny'; reason = $Reason; hash = $Hash; tier = $DetectedTier }
+    }
+
     $ExitCaptureMode = $MatchedGate.exit_capture
     $IsWrapperMode = $false
 
@@ -425,50 +590,34 @@ function Invoke-GateValidation {
             $WrapperFail = "command does not end with '$WrapperMustEndWith'"
         }
         if (-not $WrapperOk) {
-            $Reason = "WRAPPER VALIDATION FAILED: exit_capture=wrapper_required but $WrapperFail. SHA256: $Hash"
-            Write-BlockedRecord $Command $Hash $Reason $DetectedTier
-            return @{ action = 'deny'; reason = $Reason; hash = $Hash; tier = $DetectedTier }
+            return (& $DenyRejected "WRAPPER VALIDATION FAILED: exit_capture=wrapper_required but $WrapperFail. SHA256: $Hash")
         }
         $WrappedCmd = $MatchedGate.wrapped_command
         $WrappedHash = $MatchedGate.wrapped_command_sha256
         $WrapperReason = $MatchedGate.wrapper_reason
         if ([string]::IsNullOrWhiteSpace($WrappedCmd)) {
-            $Reason = "WRAPPER IDENTITY: exit_capture=wrapper_required but no wrapped_command declared. The gate must document the semantic command being wrapped. SHA256: $Hash"
-            Write-BlockedRecord $Command $Hash $Reason $DetectedTier
-            return @{ action = 'deny'; reason = $Reason; hash = $Hash; tier = $DetectedTier }
+            return (& $DenyRejected "WRAPPER IDENTITY: exit_capture=wrapper_required but no wrapped_command declared. The gate must document the semantic command being wrapped. SHA256: $Hash")
         }
         if ([string]::IsNullOrWhiteSpace($WrappedHash)) {
-            $Reason = "WRAPPER IDENTITY: exit_capture=wrapper_required but no wrapped_command_sha256 declared. SHA256: $Hash"
-            Write-BlockedRecord $Command $Hash $Reason $DetectedTier
-            return @{ action = 'deny'; reason = $Reason; hash = $Hash; tier = $DetectedTier }
+            return (& $DenyRejected "WRAPPER IDENTITY: exit_capture=wrapper_required but no wrapped_command_sha256 declared. SHA256: $Hash")
         }
         $ExpectedWrappedHash = Get-Sha256 $WrappedCmd
         if ($WrappedHash -ne $ExpectedWrappedHash) {
-            $Reason = "WRAPPER IDENTITY: wrapped_command_sha256 does not match the hash of wrapped_command. Declared: $WrappedHash, Computed: $ExpectedWrappedHash. SHA256: $Hash"
-            Write-BlockedRecord $Command $Hash $Reason $DetectedTier
-            return @{ action = 'deny'; reason = $Reason; hash = $Hash; tier = $DetectedTier }
+            return (& $DenyRejected "WRAPPER IDENTITY: wrapped_command_sha256 does not match the hash of wrapped_command. Declared: $WrappedHash, Computed: $ExpectedWrappedHash. SHA256: $Hash")
         }
         if (-not $Command.Contains($WrappedCmd)) {
-            $Reason = "WRAPPER IDENTITY: wrapped_command is not found inside the full command. The wrapper must contain the declared semantic command. SHA256: $Hash"
-            Write-BlockedRecord $Command $Hash $Reason $DetectedTier
-            return @{ action = 'deny'; reason = $Reason; hash = $Hash; tier = $DetectedTier }
+            return (& $DenyRejected "WRAPPER IDENTITY: wrapped_command is not found inside the full command. The wrapper must contain the declared semantic command. SHA256: $Hash")
         }
         if ([string]::IsNullOrWhiteSpace($WrapperReason)) {
-            $Reason = "WRAPPER IDENTITY: exit_capture=wrapper_required but no wrapper_reason declared. SHA256: $Hash"
-            Write-BlockedRecord $Command $Hash $Reason $DetectedTier
-            return @{ action = 'deny'; reason = $Reason; hash = $Hash; tier = $DetectedTier }
+            return (& $DenyRejected "WRAPPER IDENTITY: exit_capture=wrapper_required but no wrapper_reason declared. SHA256: $Hash")
         }
     } elseif ($ExitCaptureMode -eq 'not_applicable') {
         $ecReason = $MatchedGate.exit_capture_reason
         if ([string]::IsNullOrWhiteSpace($ecReason)) {
-            $Reason = "EXIT CAPTURE: gate declares exit_capture=not_applicable but no exit_capture_reason provided. SHA256: $Hash"
-            Write-BlockedRecord $Command $Hash $Reason $DetectedTier
-            return @{ action = 'deny'; reason = $Reason; hash = $Hash; tier = $DetectedTier }
+            return (& $DenyRejected "EXIT CAPTURE: gate declares exit_capture=not_applicable but no exit_capture_reason provided. SHA256: $Hash")
         }
         if ($ValidNaReasons.Count -gt 0 -and $ecReason -notin $ValidNaReasons) {
-            $Reason = "EXIT CAPTURE: exit_capture_reason '$ecReason' is not in the approved list ($($ValidNaReasons -join ', ')). SHA256: $Hash"
-            Write-BlockedRecord $Command $Hash $Reason $DetectedTier
-            return @{ action = 'deny'; reason = $Reason; hash = $Hash; tier = $DetectedTier }
+            return (& $DenyRejected "EXIT CAPTURE: exit_capture_reason '$ecReason' is not in the approved list ($($ValidNaReasons -join ', ')). SHA256: $Hash")
         }
     } else {
         $HasExitSuffix = $false
@@ -480,9 +629,7 @@ function Invoke-GateValidation {
         }
         if (-not $HasExitSuffix) {
             $SuffixHint = ($ExitSuffixes | ForEach-Object { "'$_'" }) -join ' or '
-            $Reason = "EXIT CAPTURE REQUIRED: command does not end with an approved exit-capture suffix ($SuffixHint) and gate does not declare exit_capture=wrapper_required or not_applicable. SHA256: $Hash"
-            Write-BlockedRecord $Command $Hash $Reason $DetectedTier
-            return @{ action = 'deny'; reason = $Reason; hash = $Hash; tier = $DetectedTier }
+            return (& $DenyRejected "EXIT CAPTURE REQUIRED: command does not end with an approved exit-capture suffix ($SuffixHint) and gate does not declare exit_capture=wrapper_required or not_applicable. SHA256: $Hash")
         }
     }
 
@@ -497,56 +644,30 @@ function Invoke-GateValidation {
         $IsChained = Test-ChainViolation $Command
         if ($IsChained) {
             if ($MatchedGate.multi_command -ne $true -or $DeclaredSegments.Count -eq 0) {
-                $Reason = "UNDECLARED CHAINING: command contains chained operators (;, &&, ||, |) but the gate does not declare multi_command:true with segments. SHA256: $Hash"
-                Write-BlockedRecord $Command $Hash $Reason -1
-                return @{ action = 'deny'; reason = $Reason; hash = $Hash; tier = -1 }
+                return (& $DenyRejected "UNDECLARED CHAINING: command contains chained operators (;, &&, ||, |) but the gate does not declare multi_command:true with segments. SHA256: $Hash")
             }
             if (-not $Decomposition.segments_match) {
                 $detectedList = ($Decomposition.segments_detected | ForEach-Object { "'$_'" }) -join ', '
                 $declaredList = ($DeclaredSegments | ForEach-Object { "'$_'" }) -join ', '
-                $Reason = "SEGMENT MISMATCH: declared segments do not match decomposed command structure. Detected: [$detectedList] Declared: [$declaredList]. SHA256: $Hash"
-                Write-BlockedRecord $Command $Hash $Reason $DetectedTier
-                return @{ action = 'deny'; reason = $Reason; hash = $Hash; tier = $DetectedTier }
+                return (& $DenyRejected "SEGMENT MISMATCH: declared segments do not match decomposed command structure. Detected: [$detectedList] Declared: [$declaredList]. SHA256: $Hash")
             }
         }
 
         if ($Decomposition.ambiguous_parse -and $DetectedTier -lt 1) {
             $rwi = $MatchedGate.read_write_impact
             if ($null -eq $rwi -or $null -eq $rwi.writes) {
-                $Reason = "AMBIGUOUS COMMAND: cannot safely decompose; requires tier >= 1 or explicit read_write_impact. SHA256: $Hash"
-                Write-BlockedRecord $Command $Hash $Reason $DetectedTier
-                return @{ action = 'deny'; reason = $Reason; hash = $Hash; tier = $DetectedTier }
+                return (& $DenyRejected "AMBIGUOUS COMMAND: cannot safely decompose; requires tier >= 1 or explicit read_write_impact. SHA256: $Hash")
             }
         }
     }
 
     # Step 5b: Evidence chain linkage
-    $SessionIdForChain = $Payload.session_id
-    if ($SessionIdForChain) {
-        $SCPathChain = Join-Path $GateRoot 'hooks\session_continuity.ps1'
-        try {
-            if (Test-Path $SCPathChain) {
-                . $SCPathChain
-                $ledger = Get-SessionLedger -GateRoot $GateRoot -SessionId $SessionIdForChain
-                $lastEvidence = $null
-                for ($li = $ledger.Count - 1; $li -ge 0; $li--) {
-                    if ($ledger[$li].event_type -eq 'posttooluse_evidence_written') {
-                        $lastEvidence = $ledger[$li]
-                        break
-                    }
-                }
-                if ($null -ne $lastEvidence) {
-                    $hasPrevCorr = ($null -ne $MatchedGate.previous_correlation_id -and $MatchedGate.previous_correlation_id.Length -gt 0)
-                    $hasNewChain = ($MatchedGate.new_chain -eq $true)
-                    if (-not $hasPrevCorr -and -not $hasNewChain) {
-                        $prevCorr = $lastEvidence.correlation_id
-                        $Reason = "CHAIN LINKAGE: previous evidence exists (correlation_id: $prevCorr) but gate declares neither previous_correlation_id nor new_chain:true. SHA256: $Hash"
-                        Write-BlockedRecord $Command $Hash $Reason $DetectedTier
-                        return @{ action = 'deny'; reason = $Reason; hash = $Hash; tier = $DetectedTier }
-                    }
-                }
-            }
-        } catch {}
+    if ($SessionId -and $null -ne $LastCorrelationId) {
+        $hasPrevCorr = ($null -ne $MatchedGate.previous_correlation_id -and $MatchedGate.previous_correlation_id.Length -gt 0)
+        $hasNewChain = ($MatchedGate.new_chain -eq $true)
+        if (-not $hasPrevCorr -and -not $hasNewChain) {
+            return (& $DenyRejected "CHAIN LINKAGE: previous evidence exists (correlation_id: $LastCorrelationId) but gate declares neither previous_correlation_id nor new_chain:true. SHA256: $Hash")
+        }
     }
 
     # Step 6: Valid gate — move to inflight
