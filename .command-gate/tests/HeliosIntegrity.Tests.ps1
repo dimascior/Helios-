@@ -97,7 +97,9 @@ Describe "Helios Integrity Bridge" {
             $result = Compare-HeliosProtectedEnvelope -CurrentSnapshot $snapshot -ManifestHashes $tamperedHashes
 
             $result.verdict | Should -Be 'DRIFT'
-            $drifted = $result.details | Where-Object { $_.drift_source.Count -gt 0 }
+            # PS 5.1: a single filtered result is not auto-wrapped, so $x.Count would
+            # return the hashtable key-count (6) and $x[0] would be $null. Coerce to array.
+            $drifted = @($result.details | Where-Object { $_.drift_source.Count -gt 0 })
             $drifted.Count | Should -Be 1
             $drifted[0].path | Should -Be 'hooks/gate_check.ps1'
             $drifted[0].drift_source | Should -Contain 'MANIFEST'
@@ -114,7 +116,7 @@ Describe "Helios Integrity Bridge" {
 
             $result.verdict | Should -Be 'DRIFT'
             $result.checked_against_baseline | Should -Be $true
-            $drifted = $result.details | Where-Object { 'BASELINE' -in $_.drift_source }
+            $drifted = @($result.details | Where-Object { 'BASELINE' -in $_.drift_source })
             $drifted.Count | Should -Be 1
             $drifted[0].path | Should -Be 'policy/command-policy.json'
         }
@@ -173,7 +175,7 @@ Describe "Helios Integrity Bridge" {
             $baseline = Get-Content $result.path -Raw | ConvertFrom-Json
             $baseline.schema_version | Should -Be 'helios-baseline.v1'
             $baseline.session_id | Should -Be 'baseline-test'
-            $baseline.protected_hashes.PSObject.Properties.Count | Should -Be $script:ExpectedHashes.Count
+            @($baseline.protected_hashes.PSObject.Properties).Count | Should -Be $script:ExpectedHashes.Count
         }
 
         It "refuses baseline when manifest has drift" {
@@ -303,142 +305,25 @@ Describe "Helios Maintenance Corridor" {
         }
     }
 
-    Context "Read-MaintenanceRebaselineRequest" {
-        It "returns null when no request exists" {
-            $result = Read-MaintenanceRebaselineRequest -Root $script:MaintRoot
-            $result | Should -BeNullOrEmpty
+    Context "Integrity ownership (item 8: no self-rebaseline)" {
+        BeforeAll {
+            $script:FcSource = Get-Content (Join-Path $script:GateRoot '.command-gate\hooks\helios_pretooluse.ps1') -Raw
         }
 
-        It "reads valid request file" {
-            $reqPath = Join-Path $script:MaintRoot 'maintenance\rebaseline-request.json'
-            $req = @{
-                schema_version       = 'helios-maintenance-rebaseline.v1'
-                request_id           = 'test-req-001'
-                created_utc          = (Get-Date).ToUniversalTime().ToString('o')
-                expires_utc          = (Get-Date).AddHours(2).ToUniversalTime().ToString('o')
-                requested_by         = 'test'
-                base_manifest_hash   = $script:ManifestHash
-                expected_drift_paths = @('hooks/helios_pretooluse.ps1')
-                reason               = 'test reason'
-                write_mode           = 'front_controller_internal_rebaseline'
-            }
-            $req | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $reqPath -Encoding UTF8
-            try {
-                $result = Read-MaintenanceRebaselineRequest -Root $script:MaintRoot
-                $result | Should -Not -BeNullOrEmpty
-                $result.request.schema_version | Should -Be 'helios-maintenance-rebaseline.v1'
-                $result.path | Should -Be $reqPath
-            } finally {
-                Remove-Item $reqPath -Force -ErrorAction SilentlyContinue
-            }
-        }
-    }
-
-    Context "Test-MaintenanceRebaselineRequest" {
-        It "rejects expired request" {
-            $req = @{
-                request = @{
-                    schema_version       = 'helios-maintenance-rebaseline.v1'
-                    write_mode           = 'front_controller_internal_rebaseline'
-                    expires_utc          = '2020-01-01T00:00:00Z'
-                    base_manifest_hash   = $script:ManifestHash
-                    expected_drift_paths = @('hooks/helios_pretooluse.ps1')
-                }
-            }
-            $result = Test-MaintenanceRebaselineRequest -Request $req -SidecarHash $script:ManifestHash `
-                -ActualDriftPaths @('hooks/helios_pretooluse.ps1') -MHashes $script:FileHashes
-            $result.valid | Should -Be $false
-            $result.reason | Should -Match 'expired'
+        It "front controller defines no internal rebaseline authority" {
+            Get-Command Invoke-InternalRebaseline -ErrorAction SilentlyContinue | Should -BeNullOrEmpty
+            Get-Command Test-MaintenanceRebaselineRequest -ErrorAction SilentlyContinue | Should -BeNullOrEmpty
+            Get-Command Read-MaintenanceRebaselineRequest -ErrorAction SilentlyContinue | Should -BeNullOrEmpty
         }
 
-        It "rejects wrong schema_version" {
-            $req = @{
-                request = @{
-                    schema_version       = 'wrong-version'
-                    write_mode           = 'front_controller_internal_rebaseline'
-                    expires_utc          = (Get-Date).AddHours(2).ToUniversalTime().ToString('o')
-                    base_manifest_hash   = $script:ManifestHash
-                    expected_drift_paths = @('hooks/helios_pretooluse.ps1')
-                }
-            }
-            $result = Test-MaintenanceRebaselineRequest -Request $req -SidecarHash $script:ManifestHash `
-                -ActualDriftPaths @('hooks/helios_pretooluse.ps1') -MHashes $script:FileHashes
-            $result.valid | Should -Be $false
-            $result.reason | Should -Match 'schema_version'
+        It "front controller source contains no internal-rebaseline functions" {
+            $script:FcSource | Should -Not -Match 'function Invoke-InternalRebaseline'
+            $script:FcSource | Should -Not -Match 'function Test-MaintenanceRebaselineRequest'
         }
 
-        It "rejects base_manifest_hash mismatch" {
-            $req = @{
-                request = @{
-                    schema_version       = 'helios-maintenance-rebaseline.v1'
-                    write_mode           = 'front_controller_internal_rebaseline'
-                    expires_utc          = (Get-Date).AddHours(2).ToUniversalTime().ToString('o')
-                    base_manifest_hash   = '0' * 64
-                    expected_drift_paths = @('hooks/helios_pretooluse.ps1')
-                }
-            }
-            $result = Test-MaintenanceRebaselineRequest -Request $req -SidecarHash $script:ManifestHash `
-                -ActualDriftPaths @('hooks/helios_pretooluse.ps1') -MHashes $script:FileHashes
-            $result.valid | Should -Be $false
-            $result.reason | Should -Match 'base_manifest_hash mismatch'
-        }
-
-        It "rejects drift path mismatch" {
-            $req = @{
-                request = @{
-                    schema_version       = 'helios-maintenance-rebaseline.v1'
-                    write_mode           = 'front_controller_internal_rebaseline'
-                    expires_utc          = (Get-Date).AddHours(2).ToUniversalTime().ToString('o')
-                    base_manifest_hash   = $script:ManifestHash
-                    expected_drift_paths = @('hooks/gate_check.ps1')
-                }
-            }
-            $result = Test-MaintenanceRebaselineRequest -Request $req -SidecarHash $script:ManifestHash `
-                -ActualDriftPaths @('hooks/helios_pretooluse.ps1') -MHashes $script:FileHashes
-            $result.valid | Should -Be $false
-            $result.reason | Should -Match 'mismatch'
-        }
-
-        It "accepts valid request with matching drift" {
-            $req = @{
-                request = @{
-                    schema_version       = 'helios-maintenance-rebaseline.v1'
-                    write_mode           = 'front_controller_internal_rebaseline'
-                    expires_utc          = (Get-Date).AddHours(2).ToUniversalTime().ToString('o')
-                    base_manifest_hash   = $script:ManifestHash
-                    expected_drift_paths = @('hooks/helios_pretooluse.ps1')
-                }
-            }
-            $result = Test-MaintenanceRebaselineRequest -Request $req -SidecarHash $script:ManifestHash `
-                -ActualDriftPaths @('hooks/helios_pretooluse.ps1') -MHashes $script:FileHashes
-            $result.valid | Should -Be $true
-        }
-    }
-
-    Context "Invoke-InternalRebaseline" {
-        It "recomputes hashes and writes BOM-free manifest" {
-            $targetPath = Join-Path $script:MaintRoot 'hooks\helios_pretooluse.ps1'
-            [System.IO.File]::WriteAllText($targetPath, 'modified content', (New-Object System.Text.UTF8Encoding($false)))
-
-            $req = @{
-                request = @{
-                    requested_by = 'test-rebaseline'
-                    reason       = 'test rebaseline'
-                }
-            }
-            $result = Invoke-InternalRebaseline -Root $script:MaintRoot -Request $req -MHashes $script:FileHashes
-
-            $result.new_manifest_hash | Should -Match '^[0-9a-f]{64}$'
-            $result.updated_hashes.Count | Should -Be $script:FileHashes.Count
-
-            $mBytes = [System.IO.File]::ReadAllBytes((Join-Path $script:MaintRoot 'manifest\helios-envelope.json'))
-            $mBytes[0] | Should -Not -Be 239
-            $mBytes[1] | Should -Not -Be 187
-
-            $sContent = [System.IO.File]::ReadAllText((Join-Path $script:MaintRoot 'manifest\helios-envelope.sha256'))
-            $sContent | Should -Be $result.new_manifest_hash
-
-            [System.IO.File]::WriteAllText($targetPath, $script:TestFiles['hooks/helios_pretooluse.ps1'], (New-Object System.Text.UTF8Encoding($false)))
+        It "drift is denied with HELIOS/1 DENY INTEGRITY_DRIFT and points to Akashic" {
+            $script:FcSource | Should -Match 'HELIOS/1 DENY INTEGRITY_DRIFT'
+            $script:FcSource | Should -Match 'Akashic'
         }
     }
 
@@ -540,7 +425,7 @@ Describe "Helios Tools" {
                 $result = & $verifyScript -GateRoot $script:ToolTestRoot
 
                 $result.verdict | Should -Be 'DRIFT'
-                $drifted = $result.file_details | Where-Object { $_.status -ne 'CLEAN' }
+                $drifted = @($result.file_details | Where-Object { $_.status -ne 'CLEAN' })
                 $drifted.Count | Should -BeGreaterThan 0
                 $drifted[0].path | Should -Be 'hooks/gate_check.ps1'
             } finally {
@@ -610,7 +495,7 @@ Describe "Helios Tools" {
 
                 $result.verdict | Should -Be 'COMPLETE'
                 $result.command_count | Should -Be 1
-                $result.commands[0].tool_use_id | Should -Be $toolId
+                @($result.commands)[0].tool_use_id | Should -Be $toolId
             } finally {
                 Remove-Item -Recurse -Force $chainTestRoot -ErrorAction SilentlyContinue
             }
@@ -630,8 +515,8 @@ Describe "Helios Tools" {
                 $result = & $chainScript -GateRoot $chainTestRoot -SessionId 'chain-test2'
 
                 $result.verdict | Should -Be 'INCOMPLETE'
-                $result.commands[0].missing | Should -Contain 'after'
-                $result.commands[0].missing | Should -Contain 'compare'
+                @($result.commands)[0].missing | Should -Contain 'after'
+                @($result.commands)[0].missing | Should -Contain 'compare'
             } finally {
                 Remove-Item -Recurse -Force $chainTestRoot -ErrorAction SilentlyContinue
             }
@@ -709,4 +594,489 @@ Describe "Helios Tools" {
             }
         }
     }
+}
+
+Describe "HELIOS/1 Ingress Adapters and Virtual Corridor" {
+
+    BeforeAll {
+        $script:CGRoot = Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) '.command-gate'
+        $HeliosDotSourceFunctionsOnly = $true
+        . (Join-Path $script:CGRoot 'hooks\helios_pretooluse.ps1')
+        . (Join-Path $script:CGRoot 'hooks\session_continuity.ps1')
+
+        # Temp gate root with the canonical schema, live policy, and helpers.
+        $script:VRoot = Join-Path ([System.IO.Path]::GetTempPath()) "helios-virt-$([guid]::NewGuid().ToString('N').Substring(0,8))"
+        foreach ($d in @('hooks', 'schema', 'adapters', 'policy', 'blocked', 'pending', 'session', 'manifest')) {
+            New-Item -ItemType Directory -Path (Join-Path $script:VRoot $d) -Force | Out-Null
+        }
+        Copy-Item (Join-Path $script:CGRoot 'schema\helios-gate.schema.json') (Join-Path $script:VRoot 'schema\helios-gate.schema.json')
+        Copy-Item (Join-Path $script:CGRoot 'policy\command-policy.json') (Join-Path $script:VRoot 'policy\command-policy.json')
+        Copy-Item (Join-Path $script:CGRoot 'hooks\command_decomposer.ps1') (Join-Path $script:VRoot 'hooks\command_decomposer.ps1')
+        Copy-Item (Join-Path $script:CGRoot 'hooks\session_continuity.ps1') (Join-Path $script:VRoot 'hooks\session_continuity.ps1')
+
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        $schemaBytes = [System.IO.File]::ReadAllBytes((Join-Path $script:VRoot 'schema\helios-gate.schema.json'))
+        $script:SchemaSha = ($sha.ComputeHash($schemaBytes) | ForEach-Object { $_.ToString('x2') }) -join ''
+        $script:VManifest = @{ 'schema/helios-gate.schema.json' = $script:SchemaSha }
+
+        $script:NowUtc = (Get-Date).ToUniversalTime()
+        function New-TestBlockedRecord {
+            param([string]$Id, [string]$SessionId, [datetime]$When, [string]$Command = 'ls /tmp')
+            $rec = [ordered]@{
+                timestamp_utc     = $When.ToString('o')
+                command           = $Command
+                command_sha256    = ('a' * 64)
+                detected_tier     = 1
+                session_id        = $SessionId
+                tool_use_id       = 'toolu_test'
+                tool_name         = 'Bash'
+                shell             = 'bash'
+                working_directory = 'C:\work'
+                reason_code       = 'GATE_REQUIRED'
+                reason            = 'test'
+            }
+            $path = Join-Path $script:VRoot "blocked\$Id.blocked.json"
+            [System.IO.File]::WriteAllText($path, ($rec | ConvertTo-Json -Depth 4), [System.Text.Encoding]::UTF8)
+        }
+    }
+
+    AfterAll {
+        if ($script:VRoot -and (Test-Path $script:VRoot)) {
+            Remove-Item -Recurse -Force $script:VRoot -ErrorAction SilentlyContinue
+        }
+    }
+
+    Context "Ingress adapter normalization (required tests 3-8)" {
+        It "normalizes Claude Bash payload (test 4)" {
+            $p = [PSCustomObject]@{ tool_name = 'Bash'; cwd = 'C:\w'; session_id = 's1'; tool_use_id = 't1'
+                tool_input = [PSCustomObject]@{ command = 'echo hi' } }
+            $r = Get-HeliosCanonicalRequest -Payload $p
+            $r.is_exec_tool | Should -Be $true
+            $r.shell | Should -Be 'bash'
+            $r.command | Should -Be 'echo hi'
+            $r.effective_cwd | Should -Be 'C:\w'
+        }
+
+        It "normalizes Claude PowerShell payload (test 5)" {
+            $p = [PSCustomObject]@{ tool_name = 'PowerShell'; cwd = 'C:\w'; session_id = 's1'; tool_use_id = 't1'
+                tool_input = [PSCustomObject]@{ command = 'Get-Date' } }
+            $r = Get-HeliosCanonicalRequest -Payload $p
+            $r.shell | Should -Be 'powershell'
+            $r.command | Should -Be 'Get-Date'
+        }
+
+        It "normalizes the confirmed Codex payload shape (test 6: tool_name Bash, cwd=workdir)" {
+            $p = [PSCustomObject]@{ tool_name = 'Bash'; cwd = 'C:\Users\dimas\Desktop\CODEAPI'
+                session_id = '019f528e-f009-7831-b59b-636c13462573'; tool_use_id = 'exec-77f6109e'
+                tool_input = [PSCustomObject]@{ command = 'echo helios-capture-test' } }
+            $r = Get-HeliosCanonicalRequest -Payload $p
+            $r.is_exec_tool | Should -Be $true
+            $r.command | Should -Be 'echo helios-capture-test'
+            $r.effective_cwd | Should -Be 'C:\Users\dimas\Desktop\CODEAPI'
+            $r.tool_use_id | Should -Be 'exec-77f6109e'
+        }
+
+        It "does not accept a non-string (argv) command; no argv subsystem needed" {
+            $p = [PSCustomObject]@{ tool_name = 'Bash'; cwd = 'C:\w'; session_id = 's'; tool_use_id = 't'
+                tool_input = [PSCustomObject]@{ command = @('bash', '-lc', 'echo hi') } }
+            $r = Get-HeliosCanonicalRequest -Payload $p
+            $r.command | Should -BeNullOrEmpty
+        }
+
+        It "uses tool_input.workdir as effective cwd when present (test 8)" {
+            $p = [PSCustomObject]@{ tool_name = 'Bash'; cwd = 'C:\hook-cwd'; session_id = 's'; tool_use_id = 't'
+                tool_input = [PSCustomObject]@{ command = 'ls'; workdir = 'C:\real-workdir' } }
+            $r = Get-HeliosCanonicalRequest -Payload $p
+            $r.effective_cwd | Should -Be 'C:\real-workdir'
+        }
+
+        It "non-exec tools are not exec tools (passthrough class)" {
+            $p = [PSCustomObject]@{ tool_name = 'Read'; cwd = 'C:\w'; session_id = 's'; tool_use_id = 't'
+                tool_input = [PSCustomObject]@{ file_path = 'x' } }
+            $r = Get-HeliosCanonicalRequest -Payload $p
+            $r.is_exec_tool | Should -Be $false
+            $r.command | Should -BeNullOrEmpty
+        }
+
+        It "existing Bash|PowerShell matcher is preserved (no catch-all, no second hook system)" {
+            # The production Codex integration relies on tool_name 'Bash'; confirm
+            # the front controller recognizes exactly the Claude-compatible exec tools.
+            (Get-HeliosCanonicalRequest -Payload ([PSCustomObject]@{ tool_name = 'Bash'; tool_input = [PSCustomObject]@{ command = 'x' } })).is_exec_tool | Should -Be $true
+            (Get-HeliosCanonicalRequest -Payload ([PSCustomObject]@{ tool_name = 'PowerShell'; tool_input = [PSCustomObject]@{ command = 'x' } })).is_exec_tool | Should -Be $true
+        }
+    }
+
+    Context "Virtual grammar (tests 11, 17-21)" {
+        It "recognizes bare schema request" {
+            $r = Get-HeliosVirtualRequest -Command 'helios gate schema'
+            $r.valid | Should -Be $true
+            $r.op | Should -Be 'schema'
+        }
+
+        It "rejects pipes, redirection, chaining, substitution, extra args (test 21)" {
+            foreach ($bad in @(
+                'helios gate schema | cat',
+                'helios gate schema > out.txt',
+                'helios gate schema; ls',
+                'helios gate schema && ls',
+                'helios gate schema $(ls)',
+                'helios gate schema --tier 2 --shell bash --bogus',
+                'helios gate schema --tier 9 --shell bash',
+                'helios gate schema --tier 2',
+                'helios gate destroy'
+            )) {
+                $r = Get-HeliosVirtualRequest -Command $bad
+                $r | Should -Not -BeNullOrEmpty
+                $r.valid | Should -Be $false
+            }
+        }
+
+        It "does not claim non-helios commands" {
+            Get-HeliosVirtualRequest -Command 'echo helios gate schema' | Should -BeNullOrEmpty
+            Get-HeliosVirtualRequest -Command 'ls' | Should -BeNullOrEmpty
+        }
+
+        It "bare schema returns index only, two-line envelope, no gate consumed (tests 13, 17, 18)" {
+            New-TestBlockedRecord -Id '20260711-000000-aaaaaaaaaaaa' -SessionId 'vsess' -When ($script:NowUtc.AddMinutes(-20))
+            $pendingProbe = Join-Path $script:VRoot 'pending\probe.gate.json'
+            [System.IO.File]::WriteAllText($pendingProbe, '{"schema_version":"command-gate.v1"}', [System.Text.Encoding]::UTF8)
+
+            $req = Get-HeliosVirtualRequest -Command 'helios gate schema'
+            $resp = Invoke-HeliosVirtualOperation -Request $req -Root $script:VRoot -ManifestHashes $script:VManifest -SessionId 'vsess' -ToolUseId 'tv1'
+
+            $resp.sentinel | Should -Be 'HELIOS/1 VIRTUAL schema OK'
+            $resp.body.executed | Should -Be $false
+            $resp.body.result.index | Should -Not -BeNullOrEmpty
+            $resp.body.result.PSObject.Properties['sections'] | Should -BeNullOrEmpty
+            $resp.body.schema_sha256 | Should -Be $script:SchemaSha
+            Test-Path $pendingProbe | Should -Be $true
+        }
+
+        It "tier/shell projection merges live policy fields and stays bounded (tests 19, 20)" {
+            $req = Get-HeliosVirtualRequest -Command 'helios gate schema --tier 3 --shell powershell --example'
+            $resp = Invoke-HeliosVirtualOperation -Request $req -Root $script:VRoot -ManifestHashes $script:VManifest -SessionId 'vsess' -ToolUseId 'tv2'
+
+            $resp.sentinel | Should -Be 'HELIOS/1 VIRTUAL schema OK'
+            @($resp.body.result.tier_required_fields) | Should -Contain 'read_write_impact'
+            @($resp.body.result.tier_required_fields) | Should -Contain 'stop_conditions'
+            @($resp.body.result.required_base_fields).Count | Should -Be 17
+            $wire = "$($resp.sentinel)`n" + ($resp.body | ConvertTo-Json -Depth 10 -Compress)
+            $wire.Length | Should -BeLessThan 8192
+        }
+
+        It "every section projection stays under the hard cap (test 20)" {
+            $doc = (Get-Content (Join-Path $script:VRoot 'schema\helios-gate.schema.json') -Raw | ConvertFrom-Json)
+            foreach ($sec in $doc.sections.PSObject.Properties) {
+                $req = Get-HeliosVirtualRequest -Command "helios gate schema --section $($sec.Name)"
+                $resp = Invoke-HeliosVirtualOperation -Request $req -Root $script:VRoot -ManifestHashes $script:VManifest -SessionId 'vsess' -ToolUseId 'tv3'
+                $wire = "$($resp.sentinel)`n" + ($resp.body | ConvertTo-Json -Depth 10 -Compress)
+                $wire.Length | Should -BeLessThan 8192
+            }
+        }
+
+        It "fails closed when the canonical schema is unmanifested (test 11 fail-closed contract)" {
+            { Read-HeliosCanonicalSchema -Root $script:VRoot -ManifestHashes @{} } | Should -Throw
+        }
+
+        It "validator and responder read the same canonical schema (test 37)" {
+            $GateRoot = $script:VRoot
+            $HeliosFrontControllerActive = $true
+            . (Join-Path $script:CGRoot 'hooks\gate_check.ps1')
+            $GateRoot = $script:VRoot
+            $fromValidator = @(Get-RequiredBaseFields)
+            $fromResponder = @((Read-HeliosCanonicalSchema -Root $script:VRoot -ManifestHashes $script:VManifest).doc.sections.fields.required_base_fields)
+            ($fromValidator -join ',') | Should -Be ($fromResponder -join ',')
+        }
+    }
+
+    Context "Scaffold binding (tests 26-34)" {
+        It "rejects malformed and traversal ids (tests 26, 27)" {
+            foreach ($bad in @('not-an-id', '..\..\evil', '20260711-000000-zzzzzzzzzzzz', 'x/20260711-000000-aaaaaaaaaaaa')) {
+                $r = Resolve-HeliosBlockedRecord -Root $script:VRoot -BlockedId $bad -SessionId 'vsess'
+                $r.ok | Should -Be $false
+                $r.code | Should -Be 'BAD_ID'
+            }
+        }
+
+        It "rejects expired records (test 28)" {
+            New-TestBlockedRecord -Id '20260711-000001-bbbbbbbbbbbb' -SessionId 'vsess' -When ($script:NowUtc.AddMinutes(-45))
+            $r = Resolve-HeliosBlockedRecord -Root $script:VRoot -BlockedId '20260711-000001-bbbbbbbbbbbb' -SessionId 'vsess'
+            $r.ok | Should -Be $false
+            $r.code | Should -Be 'EXPIRED'
+        }
+
+        It "rejects another session's record (test 29)" {
+            New-TestBlockedRecord -Id '20260711-000002-cccccccccccc' -SessionId 'other-session' -When $script:NowUtc
+            $r = Resolve-HeliosBlockedRecord -Root $script:VRoot -BlockedId '20260711-000002-cccccccccccc' -SessionId 'vsess'
+            $r.ok | Should -Be $false
+            $r.code | Should -Be 'SESSION_MISMATCH'
+        }
+
+        It "returns STALE_RECORD for legacy records without session ids (test 30)" {
+            $legacy = [ordered]@{ timestamp_utc = $script:NowUtc.ToString('o'); command = 'ls'; command_sha256 = ('b' * 64); tier = 1; reason = 'legacy' }
+            [System.IO.File]::WriteAllText((Join-Path $script:VRoot 'blocked\20260711-000003-dddddddddddd.blocked.json'), ($legacy | ConvertTo-Json), [System.Text.Encoding]::UTF8)
+            $r = Resolve-HeliosBlockedRecord -Root $script:VRoot -BlockedId '20260711-000003-dddddddddddd' -SessionId 'vsess'
+            $r.ok | Should -Be $false
+            $r.code | Should -Be 'STALE_RECORD'
+        }
+
+        It "bare scaffold selects the newest in-TTL record for the session (test 31)" {
+            New-TestBlockedRecord -Id '20260711-000004-eeeeeeeeeeee' -SessionId 'vsess' -When ($script:NowUtc.AddMinutes(-10)) -Command 'older'
+            New-TestBlockedRecord -Id '20260711-000005-ffffffffffff' -SessionId 'vsess' -When ($script:NowUtc.AddMinutes(-1)) -Command 'newer'
+            $r = Resolve-HeliosBlockedRecord -Root $script:VRoot -BlockedId $null -SessionId 'vsess'
+            $r.ok | Should -Be $true
+            $r.id | Should -Be '20260711-000005-ffffffffffff'
+        }
+
+        It "scaffold prefills observed values, leaves semantics unresolved, writes nothing to pending (tests 32-34)" {
+            $pendingBefore = @(Get-ChildItem (Join-Path $script:VRoot 'pending') -File).Count
+            $req = Get-HeliosVirtualRequest -Command 'helios gate scaffold --blocked-id 20260711-000005-ffffffffffff'
+            $resp = Invoke-HeliosVirtualOperation -Request $req -Root $script:VRoot -ManifestHashes $script:VManifest -SessionId 'vsess' -ToolUseId 'tv4'
+
+            $resp.sentinel | Should -Be 'HELIOS/1 VIRTUAL scaffold OK'
+            $resp.body.result.observed.shell | Should -Be 'bash'
+            $resp.body.result.observed.working_directory | Should -Be 'C:\work'
+            $resp.body.result.gate.need | Should -Be ''
+            $resp.body.result.gate.expected | Should -Be ''
+            @($resp.body.result.unresolved) | Should -Contain 'need'
+            @($resp.body.result.unresolved) | Should -Contain 'previous_correlation_id OR new_chain'
+            @(Get-ChildItem (Join-Path $script:VRoot 'pending') -File).Count | Should -Be $pendingBefore
+        }
+
+        It "scaffold response carries absolute destination-discovery fields inside the gate root (gap 1)" {
+            New-TestBlockedRecord -Id '20260711-000010-1a1a1a1a1a1a' -SessionId 'vsess' -When ($script:NowUtc.AddMinutes(-2)) -Command 'ls /tmp'
+            $req = Get-HeliosVirtualRequest -Command 'helios gate scaffold --blocked-id 20260711-000010-1a1a1a1a1a1a'
+            $resp = Invoke-HeliosVirtualOperation -Request $req -Root $script:VRoot -ManifestHashes $script:VManifest -SessionId 'vsess' -ToolUseId 'tvd1'
+            $resp.body.result.gate_root | Should -Be $script:VRoot
+            [System.IO.Path]::IsPathRooted($resp.body.result.pending_directory) | Should -Be $true
+            $resp.body.result.pending_directory | Should -Be (Join-Path $script:VRoot 'pending')
+            $resp.body.result.suggested_gate_path | Should -Be (Join-Path (Join-Path $script:VRoot 'pending') '<correlation-id>.gate.json')
+            $resp.body.result.write_instruction | Should -Match 'suggested_gate_path'
+            $wire = "$($resp.sentinel)`n" + ($resp.body | ConvertTo-Json -Depth 10 -Compress)
+            $wire.Length | Should -BeLessThan 8192
+        }
+
+        It "scaffold destination cannot be redirected by blocked-record working_directory (gap 1)" {
+            New-TestBlockedRecord -Id '20260711-000011-2b2b2b2b2b2b' -SessionId 'vsess' -When ($script:NowUtc.AddMinutes(-2)) -Command 'ls'
+            $bp = Join-Path $script:VRoot 'blocked\20260711-000011-2b2b2b2b2b2b.blocked.json'
+            $b = Get-Content $bp -Raw | ConvertFrom-Json
+            $b.working_directory = 'C:\evil\attacker'
+            [System.IO.File]::WriteAllText($bp, ($b | ConvertTo-Json -Depth 4), [System.Text.Encoding]::UTF8)
+            $req = Get-HeliosVirtualRequest -Command 'helios gate scaffold --blocked-id 20260711-000011-2b2b2b2b2b2b'
+            $resp = Invoke-HeliosVirtualOperation -Request $req -Root $script:VRoot -ManifestHashes $script:VManifest -SessionId 'vsess' -ToolUseId 'tvd2'
+            $resp.body.result.observed.working_directory | Should -Be 'C:\evil\attacker'
+            $resp.body.result.suggested_gate_path.StartsWith((Join-Path $script:VRoot 'pending')) | Should -Be $true
+            $resp.body.result.suggested_gate_path | Should -Not -Match 'evil'
+        }
+    }
+
+    Context "Continuity neutrality (tests 14-16)" {
+        It "virtual_op_answered creates no gap and no break (test 16)" {
+            $sid = "neutral-$([guid]::NewGuid().ToString('N').Substring(0,8))"
+            Write-SessionLedgerEntry -GateRoot $script:VRoot -SessionId $sid -EventType 'pretooluse_seen' -Data @{ command_sha256 = 'x' }
+            Write-SessionLedgerEntry -GateRoot $script:VRoot -SessionId $sid -EventType 'gate_consumed' -Data @{ correlation_id = 'c1' }
+            Write-SessionLedgerEntry -GateRoot $script:VRoot -SessionId $sid -EventType 'posttooluse_evidence_written' -Data @{ correlation_id = 'c1'; hook_presence_after = $true }
+            Write-SessionLedgerEntry -GateRoot $script:VRoot -SessionId $sid -EventType 'virtual_op_answered' -Data @{ operation = 'schema'; executed = $false }
+
+            $c = Test-SessionContinuity -GateRoot $script:VRoot -SessionId $sid
+            $c.continuity_verdict | Should -Be 'CONTINUOUS'
+            $c.total_commands | Should -Be 1
+        }
+
+        It "virtual event never becomes the executable chain predecessor (test 35 support)" {
+            $sid = "chain-$([guid]::NewGuid().ToString('N').Substring(0,8))"
+            Write-SessionLedgerEntry -GateRoot $script:VRoot -SessionId $sid -EventType 'posttooluse_evidence_written' -Data @{ correlation_id = 'exec-corr-1'; hook_presence_after = $true }
+            Write-SessionLedgerEntry -GateRoot $script:VRoot -SessionId $sid -EventType 'virtual_op_answered' -Data @{ operation = 'schema'; executed = $false }
+
+            $GateRoot = $script:VRoot
+            $HeliosFrontControllerActive = $true
+            . (Join-Path $script:CGRoot 'hooks\gate_check.ps1')
+            $GateRoot = $script:VRoot
+            Get-LastExecutableCorrelationId -SessionId $sid -Root $script:VRoot | Should -Be 'exec-corr-1'
+        }
+    }
+}
+
+Describe "HELIOS/1 Validator Enforcement" {
+
+    BeforeAll {
+        $script:CGRoot = Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) '.command-gate'
+
+        # Full temp gate root for Invoke-GateValidation.
+        $script:GRoot = Join-Path ([System.IO.Path]::GetTempPath()) "helios-gv-$([guid]::NewGuid().ToString('N').Substring(0,8))"
+        foreach ($d in @('hooks', 'schema', 'policy', 'pending', 'inflight', 'evidence', 'blocked', 'templates', 'manifest', 'session')) {
+            New-Item -ItemType Directory -Path (Join-Path $script:GRoot $d) -Force | Out-Null
+        }
+        Copy-Item (Join-Path $script:CGRoot 'schema\helios-gate.schema.json') (Join-Path $script:GRoot 'schema\helios-gate.schema.json')
+        Copy-Item (Join-Path $script:CGRoot 'policy\command-policy.json') (Join-Path $script:GRoot 'policy\command-policy.json')
+        Copy-Item (Join-Path $script:CGRoot 'hooks\command_decomposer.ps1') (Join-Path $script:GRoot 'hooks\command_decomposer.ps1')
+        Copy-Item (Join-Path $script:CGRoot 'hooks\session_continuity.ps1') (Join-Path $script:GRoot 'hooks\session_continuity.ps1')
+
+        . (Join-Path $script:CGRoot 'hooks\tier_classifier.ps1')
+        . (Join-Path $script:CGRoot 'hooks\session_continuity.ps1')
+        $HeliosFrontControllerActive = $true
+        . (Join-Path $script:CGRoot 'hooks\gate_check.ps1')
+        $GateRoot = $script:GRoot
+
+        function New-TestPayload {
+            param([string]$Command, [string]$SessionId = 'gv-sess')
+            return [PSCustomObject]@{
+                tool_name = 'Bash'
+                cwd = 'C:\work'
+                session_id = $SessionId
+                tool_use_id = "t-$([guid]::NewGuid().ToString('N').Substring(0,8))"
+                tool_input = [PSCustomObject]@{ command = $Command }
+            }
+        }
+
+        function New-TestGate {
+            param([string]$Command, [string]$SchemaVersion = 'command-gate.v1', [string]$Name = 'test-gate')
+            $sha = [System.Security.Cryptography.SHA256]::Create()
+            $hash = ($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($Command)) | ForEach-Object { $_.ToString('x2') }) -join ''
+            $gate = [ordered]@{
+                schema_version    = $SchemaVersion
+                correlation_id    = "$Name-corr"
+                created_utc       = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+                expires_utc       = (Get-Date).ToUniversalTime().AddHours(1).ToString('yyyy-MM-ddTHH:mm:ssZ')
+                command           = $Command
+                command_sha256    = $hash
+                working_directory = 'C:\work'
+                shell             = 'bash'
+                risk_tier         = 1
+                exit_capture      = 'suffix'
+                multi_command     = $true
+                segments          = @('ls /tmp', 'echo EXIT=$?')
+                need              = 'n'
+                expected          = 'e'
+                actual_means      = 'a'
+                next_logic        = 'x'
+                approval_boundary = 'read-only'
+            }
+            $path = Join-Path $script:GRoot "pending\$Name.gate.json"
+            [System.IO.File]::WriteAllText($path, ($gate | ConvertTo-Json -Depth 4), [System.Text.Encoding]::UTF8)
+            return $hash
+        }
+    }
+
+    AfterAll {
+        if ($script:GRoot -and (Test-Path $script:GRoot)) {
+            Remove-Item -Recurse -Force $script:GRoot -ErrorAction SilentlyContinue
+        }
+    }
+
+    Context "Schema-version enforcement (tests 9, 10)" {
+        It "accepts exactly command-gate.v1 (test 9)" {
+            $cmd = 'ls /tmp; echo EXIT=$?'
+            $null = New-TestGate -Command $cmd -Name 'sv-ok'
+            $r = Invoke-GateValidation -Payload (New-TestPayload -Command $cmd)
+            $r.action | Should -Be 'allow'
+            $r.correlation_id | Should -Be 'sv-ok-corr'
+        }
+
+        It "denies '1.0' with the canonical replacement in the envelope (test 10)" {
+            $cmd = 'ls /tmp; echo EXIT=$?'
+            $null = New-TestGate -Command $cmd -SchemaVersion '1.0' -Name 'sv-old'
+            $r = Invoke-GateValidation -Payload (New-TestPayload -Command $cmd)
+            $r.action | Should -Be 'deny'
+            $r.reason | Should -Match 'HELIOS/1 DENY GATE_REJECTED'
+            # ConvertTo-Json -Compress escapes single quotes as ', so match
+            # the unquoted tokens rather than literal quotes.
+            $r.reason | Should -Match 'schema_version mismatch'
+            $r.reason | Should -Match 'command-gate\.v1'
+            $r.reason | Should -Match '1\.0'
+            Remove-Item (Join-Path $script:GRoot 'pending\sv-old.gate.json') -Force
+        }
+
+        It "denies helios-gate.v1 and other unknown versions (test 10)" {
+            $cmd = 'ls /var; echo EXIT=$?'
+            $null = New-TestGate -Command $cmd -SchemaVersion 'helios-gate.v1' -Name 'sv-bad'
+            $gatePath = Join-Path $script:GRoot 'pending\sv-bad.gate.json'
+            $g = Get-Content $gatePath -Raw | ConvertFrom-Json
+            $g.segments = @('ls /var', 'echo EXIT=$?')
+            [System.IO.File]::WriteAllText($gatePath, ($g | ConvertTo-Json -Depth 4), [System.Text.Encoding]::UTF8)
+            $r = Invoke-GateValidation -Payload (New-TestPayload -Command $cmd)
+            $r.action | Should -Be 'deny'
+            $r.reason | Should -Match 'schema_version mismatch'
+            Remove-Item $gatePath -Force
+        }
+    }
+
+    Context "Structured recovery envelopes (tests 22, 23, 24, 35)" {
+        It "GATE_REQUIRED returns the HELIOS/1 envelope with an atomically-written blocked id (tests 22, 24)" {
+            $cmd = 'cat /etc/hosts; echo EXIT=$?'
+            $r = Invoke-GateValidation -Payload (New-TestPayload -Command $cmd)
+            $r.action | Should -Be 'deny'
+            $lines = $r.reason -split "`n", 2
+            $lines[0] | Should -Be 'HELIOS/1 DENY GATE_REQUIRED'
+            $body = $lines[1] | ConvertFrom-Json
+            $body.scaffold_available | Should -Be $true
+            $body.blocked_id | Should -Match '^\d{8}-\d{6}-[a-f0-9]{12}'
+            $body.schema_command | Should -Match '^helios gate schema --tier \d --shell bash$'
+            Test-Path (Join-Path $script:GRoot "blocked\$($body.blocked_id).blocked.json") | Should -Be $true
+            $rec = Get-Content (Join-Path $script:GRoot "blocked\$($body.blocked_id).blocked.json") -Raw | ConvertFrom-Json
+            $rec.session_id | Should -Be 'gv-sess'
+            $rec.shell | Should -Be 'bash'
+            $rec.working_directory | Should -Be 'C:\work'
+        }
+
+        It "GATE_REQUIRED denial carries absolute destination-discovery metadata (gap 1)" {
+            $cmd = 'ps aux; echo EXIT=$?'
+            $r = Invoke-GateValidation -Payload (New-TestPayload -Command $cmd)
+            $r.action | Should -Be 'deny'
+            $body = ($r.reason -split "`n", 2)[1] | ConvertFrom-Json
+            $body.scaffold_available | Should -Be $true
+            $body.gate_root | Should -Be $script:GRoot
+            $body.pending_directory | Should -Be (Join-Path $script:GRoot 'pending')
+            $body.suggested_gate_path.StartsWith((Join-Path $script:GRoot 'pending')) | Should -Be $true
+        }
+
+        It "closest-gate rejection uses the same grammar with reject_reasons (test 23)" {
+            $cmd = 'grep foo bar; echo EXIT=$?'
+            $hash = New-TestGate -Command $cmd -Name 'rej'
+            $gatePath = Join-Path $script:GRoot 'pending\rej.gate.json'
+            $g = Get-Content $gatePath -Raw | ConvertFrom-Json
+            $g.PSObject.Properties.Remove('need')
+            $g.segments = @('grep foo bar', 'echo EXIT=$?')
+            [System.IO.File]::WriteAllText($gatePath, ($g | ConvertTo-Json -Depth 4), [System.Text.Encoding]::UTF8)
+
+            $r = Invoke-GateValidation -Payload (New-TestPayload -Command $cmd)
+            $r.action | Should -Be 'deny'
+            $lines = $r.reason -split "`n", 2
+            $lines[0] | Should -Be 'HELIOS/1 DENY GATE_REJECTED'
+            $body = $lines[1] | ConvertFrom-Json
+            @($body.reject_reasons) -join ' ' | Should -Match 'missing base fields'
+            Remove-Item $gatePath -Force
+        }
+
+        It "chain recovery carries the latest executable correlation id (test 35)" {
+            $sid = 'gv-chain-sess'
+            Write-SessionLedgerEntry -GateRoot $script:GRoot -SessionId $sid -EventType 'posttooluse_evidence_written' -Data @{ correlation_id = 'prev-exec-7'; hook_presence_after = $true }
+            $cmd = 'df -h; echo EXIT=$?'
+            $r = Invoke-GateValidation -Payload (New-TestPayload -Command $cmd -SessionId $sid)
+            $r.action | Should -Be 'deny'
+            $body = ($r.reason -split "`n", 2)[1] | ConvertFrom-Json
+            $body.last_correlation_id | Should -Be 'prev-exec-7'
+        }
+
+        It "blocked-record persistence failure degrades to scaffold_available=false (test 25)" {
+            $cmd = 'uname -a; echo EXIT=$?'
+            $blockedDir = Join-Path $script:GRoot 'blocked'
+            $null = icacls $blockedDir /deny "Everyone:(W)" 2>&1
+            try {
+                $r = Invoke-GateValidation -Payload (New-TestPayload -Command $cmd)
+                $r.action | Should -Be 'deny'
+                $body = ($r.reason -split "`n", 2)[1] | ConvertFrom-Json
+                $body.scaffold_available | Should -Be $false
+                $body.persistence_error | Should -Be 'PERSISTENCE_ERROR'
+                $body.schema_command | Should -Match '^helios gate schema'
+            } finally {
+                $null = icacls $blockedDir /remove:d "Everyone" 2>&1
+            }
+        }
+    }
+
+    # Stale-artifact archival is Akashic-owned installation-lifecycle behavior. Its
+    # byte-identical archival acceptance lives in the Akashic suite against a
+    # disposable gate root; the historical archive of the stray '1.0' Codex gate is
+    # preserved as deployment evidence under evidence/stale/ in the live runtime.
 }
