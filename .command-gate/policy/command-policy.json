@@ -185,5 +185,6 @@
     "Rename-Item",
     "\\becho\\b.*>",
     "\\bprintf\\b.*>"
-  ]
+  ],
+  "template_mode": false
 }

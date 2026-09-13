@@ -526,20 +526,123 @@ function Invoke-GateValidation {
             return @{ action = 'deny'; reason = $Reason; hash = $Hash; tier = $DetectedTier }
         }
 
+        # --- Template mode: reuse existing functions to build a gate template ---
+        $TemplateSegments = @($Command)
+        $TemplateMultiCommand = $false
+        try {
+            . (Join-Path $GateRoot 'hooks\command_decomposer.ps1')
+            $Decomp = Get-CommandDecomposition -Command $Command -DeclaredSegments @()
+            $TemplateSegments = @($Decomp.segments_detected)
+            $TemplateMultiCommand = ($Decomp.segment_count -gt 1)
+        } catch {}
+
+        $TemplateEnabled = $false
+        $TemplateExitSuffixes = @()
+        $TemplateNaReasons = @()
+        try {
+            $TemplatePolicyPath = Join-Path $GateRoot 'policy\command-policy.json'
+            if (Test-Path $TemplatePolicyPath) {
+                $TemplatePolicy = Get-Content $TemplatePolicyPath -Raw | ConvertFrom-Json
+                if ($TemplatePolicy.exit_capture_suffixes.$Shell) {
+                    $TemplateExitSuffixes = @($TemplatePolicy.exit_capture_suffixes.$Shell)
+                }
+                if ($TemplatePolicy.exit_capture_not_applicable_reasons) {
+                    $TemplateNaReasons = @($TemplatePolicy.exit_capture_not_applicable_reasons)
+                }
+                if ($TemplatePolicy.template_mode -eq $true) {
+                    $TemplateEnabled = $true
+                }
+            }
+        } catch {}
+
         $TemplateSuggestion = ''
         if ($TierResult.MatchedTemplate) {
-            $TemplateSuggestion = " Template: $($TierResult.MatchedTemplate)."
+            $TemplateSuggestion = $TierResult.MatchedTemplate
         } elseif ($TierResult.Name) {
-            $TemplateSuggestion = " Category: $($TierResult.Name)."
+            $TemplateSuggestion = $TierResult.Name
         }
 
-        $Message = "GATE REQUIRED: No valid gate found in pending/ for this command. Tier: $DetectedTier. SHA256: $Hash.$TemplateSuggestion"
+        $ChainRequired = ($null -ne $LastCorrelationId -and $LastCorrelationId.Length -gt 0)
+        $ChainDisplay = if ($ChainRequired) { "yes (previous: $LastCorrelationId)" } else { 'no' }
+
+        $HeaderLines = @(
+            "GATE REQUIRED"
+            "  Tier           : $DetectedTier ($TemplateSuggestion)"
+            "  CWD            : $Cwd"
+            "  Shell          : $Shell"
+            "  Multi-command  : $($TemplateMultiCommand.ToString().ToLower())"
+            "  Write indicator: $($HasWriteIndicator.ToString().ToLower())"
+            "  Chain required : $ChainDisplay"
+        )
+
+        $Extra = $null
+        if ($TemplateEnabled) {
+            $HasSuffix = $false
+            foreach ($s in $TemplateExitSuffixes) {
+                if ($Command.EndsWith($s)) { $HasSuffix = $true; break }
+            }
+            $NaReasonList = $TemplateNaReasons -join ' | '
+
+            $GateTemplate = [ordered]@{
+                schema_version    = $script:HeliosGateSchemaVersion
+                correlation_id    = '<unique-id e.g. 20260913-task-001>'
+                created_utc       = '<ISO 8601 UTC e.g. 2026-09-13T14:00:00Z>'
+                expires_utc       = '<ISO 8601 UTC must be in the future>'
+                command           = $Command
+                command_sha256    = '<leave empty - returned on valid schema submission>'
+                working_directory = $Cwd
+                shell             = $Shell
+                risk_tier         = $DetectedTier
+                multi_command     = $TemplateMultiCommand
+                segments          = $TemplateSegments
+            }
+            if ($HasSuffix) {
+                $GateTemplate['exit_capture'] = 'suffix'
+            } else {
+                $GateTemplate['exit_capture'] = 'not_applicable'
+                $GateTemplate['exit_capture_reason'] = "<$NaReasonList>"
+            }
+            $GateTemplate['need']         = '<why this command is needed right now>'
+            $GateTemplate['expected']     = '<what output or result you expect>'
+            $GateTemplate['actual_means'] = '<what this command actually does to achieve the goal>'
+            $GateTemplate['next_logic']   = '<what happens after this command based on the result>'
+            if ($DetectedTier -ge 2) {
+                $GateTemplate['stop_conditions'] = '<when to stop or abort - error thresholds, failure criteria>'
+            }
+            if ($DetectedTier -ge 3 -or $HasWriteIndicator) {
+                $GateTemplate['read_write_impact'] = [ordered]@{
+                    reads  = @('<paths or resources read>')
+                    writes = @('<paths or resources created, modified, or deleted>')
+                }
+            }
+            $GateTemplate['approval_boundary'] = '<scope of what this gate authorizes e.g. read-only diagnostic>'
+            if ($ChainRequired) {
+                $GateTemplate['previous_correlation_id'] = $LastCorrelationId
+            } else {
+                $GateTemplate['new_chain'] = $true
+            }
+
+            $Hash12 = $Hash.Substring(0, 12)
+            $TemplateJson = ($GateTemplate | ConvertTo-Json -Depth 3) -replace '(?m)^', '  '
+            $HeaderLines += ""
+            $HeaderLines += "  Save as: pending/$Hash12.gate.json (use Write tool, not Bash)"
+            $HeaderLines += ""
+            $HeaderLines += "TEMPLATE:"
+            $HeaderLines += $TemplateJson
+
+            $Extra = [ordered]@{ template = $GateTemplate }
+        } else {
+            $HeaderLines += "  Template       : off (set template_mode:true in command-policy.json)"
+        }
+
+        $Message = $HeaderLines -join "`n"
         $record = & $NewBlockedRecord 'GATE_REQUIRED' $Message $null
+        if ($TemplateEnabled) { $record['template'] = $GateTemplate }
         $blockedResult = Write-HeliosBlockedRecord -Record $record -Hash $Hash -ToolUseId $ToolUseId
 
         $Reason = New-HeliosDenyReason -Code 'GATE_REQUIRED' -Message $Message -Hash $Hash `
             -Tier $DetectedTier -Shell $Shell -Cwd $Cwd -BlockedResult $blockedResult `
-            -LastCorrelationId $LastCorrelationId
+            -LastCorrelationId $LastCorrelationId -Extra $Extra
         return @{ action = 'deny'; reason = $Reason; hash = $Hash; tier = $DetectedTier }
     }
 
