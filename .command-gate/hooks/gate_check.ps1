@@ -47,6 +47,18 @@ function Get-Sha256 {
     return ($HashBytes | ForEach-Object { $_.ToString('x2') }) -join ''
 }
 
+function Get-SafeGateSlug {
+    param([string]$Command)
+    $safe = $Command -replace '[''"]', ''
+    $safe = $safe -replace '[^a-zA-Z0-9._-]', '-'
+    $safe = $safe -replace '-{2,}', '-'
+    $safe = $safe.Trim('-')
+    $safe = $safe.ToLower()
+    if ($safe.Length -gt 80) { $safe = $safe.Substring(0, 80).TrimEnd('-') }
+    if ([string]::IsNullOrWhiteSpace($safe)) { $safe = 'command' }
+    return $safe
+}
+
 function Get-HeliosSchemaSha256 {
     # Prefer the manifest-recorded hash handed over by the front controller;
     # standalone mode hashes the file directly (informational).
@@ -622,10 +634,10 @@ function Invoke-GateValidation {
                 $GateTemplate['new_chain'] = $true
             }
 
-            $Hash12 = $Hash.Substring(0, 12)
+            $GateSlug = Get-SafeGateSlug $Command
             $TemplateJson = ($GateTemplate | ConvertTo-Json -Depth 3) -replace '(?m)^', '  '
             $HeaderLines += ""
-            $HeaderLines += "  Save as: pending/$Hash12.gate.json (use Write tool, not Bash)"
+            $HeaderLines += "  Save as: pending/$GateSlug.gate.json (use Write tool, not Bash)"
             $HeaderLines += ""
             $HeaderLines += "TEMPLATE:"
             $HeaderLines += $TemplateJson
