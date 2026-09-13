@@ -616,7 +616,7 @@ function Invoke-GateValidation {
             }
             $GateTemplate['need']         = '<why this command is needed right now>'
             $GateTemplate['expected']     = '<what output or result you expect>'
-            $GateTemplate['actual_means'] = '<what this command actually does to achieve the goal>'
+            $GateTemplate['actual_means'] = '<what this command actually does and what its output means>'
             $GateTemplate['next_logic']   = '<what happens after this command based on the result>'
             if ($DetectedTier -ge 2) {
                 $GateTemplate['stop_conditions'] = '<when to stop or abort - error thresholds, failure criteria>'
@@ -635,19 +635,24 @@ function Invoke-GateValidation {
             }
 
             $GateSlug = Get-SafeGateSlug $Command
-            $TemplateJson = ($GateTemplate | ConvertTo-Json -Depth 3) -replace '(?m)^', '  '
+            $PendingDir = Join-Path $GateRoot 'pending'
+            $GatePath = Join-Path $PendingDir "$GateSlug.gate.json"
+            $TemplateDisplay = ($GateTemplate | ConvertTo-Json -Depth 3)
+
             $HeaderLines += ""
-            $HeaderLines += "  Save as: pending/$GateSlug.gate.json (use Write tool, not Bash)"
-            $HeaderLines += ""
-            $HeaderLines += "TEMPLATE:"
-            $HeaderLines += $TemplateJson
+            $HeaderLines += "Complete the template below, write to: $GatePath, then retry the same command."
 
             $Extra = [ordered]@{ template = $GateTemplate }
         } else {
             $HeaderLines += "  Template       : off (set template_mode:true in command-policy.json)"
         }
 
-        $Message = $HeaderLines -join "`n"
+        if ($TemplateEnabled) {
+            $HeaderBlock = ($HeaderLines -join "`n")
+            $Message = "$HeaderBlock`n$TemplateDisplay"
+        } else {
+            $Message = $HeaderLines -join "`n"
+        }
         $record = & $NewBlockedRecord 'GATE_REQUIRED' $Message $null
         if ($TemplateEnabled) { $record['template'] = $GateTemplate }
         $blockedResult = Write-HeliosBlockedRecord -Record $record -Hash $Hash -ToolUseId $ToolUseId
