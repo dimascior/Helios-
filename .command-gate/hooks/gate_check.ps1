@@ -535,7 +535,7 @@ function Invoke-GateValidation {
                     closest_gate = $BestDiag.file
                     reject_reasons = @($BestDiag.reasons)
                 })
-            return @{ action = 'deny'; reason = $Reason; hash = $Hash; tier = $DetectedTier }
+            return @{ action = 'deny'; reason = $Reason; display = $Message; hash = $Hash; tier = $DetectedTier }
         }
 
         # --- Template mode: reuse existing functions to build a gate template ---
@@ -660,7 +660,7 @@ function Invoke-GateValidation {
         $Reason = New-HeliosDenyReason -Code 'GATE_REQUIRED' -Message $Message -Hash $Hash `
             -Tier $DetectedTier -Shell $Shell -Cwd $Cwd -BlockedResult $blockedResult `
             -LastCorrelationId $LastCorrelationId -Extra $Extra
-        return @{ action = 'deny'; reason = $Reason; hash = $Hash; tier = $DetectedTier }
+        return @{ action = 'deny'; reason = $Reason; display = $Message; hash = $Hash; tier = $DetectedTier }
     }
 
     # Step 4: Exit-capture mode enforcement
@@ -790,7 +790,119 @@ function Invoke-GateValidation {
         }
     }
 
-    # Step 6: Valid gate — move to inflight
+    # Step 6: Terminal write field verification
+    # The gate declares data_sha256, terminal_id, enter for /term/*/write.
+    # The hook recomputes from the command AST (Parser.ParseInput) and rejects
+    # on mismatch. Non-write commands must not carry these fields. The hook
+    # always overwrites the gate's declared values with the computed ones, so
+    # an agent-declared hash can never survive unchecked into inflight/.
+    $IsTermWrite = $Command -match '/term/[^/]+/write'
+    $GateDataSha = $MatchedGate.data_sha256
+    $GateTermId  = $MatchedGate.terminal_id
+    $GateEnter   = $MatchedGate.enter
+
+    if (-not $IsTermWrite) {
+        if ($null -ne $GateDataSha -or $null -ne $GateTermId -or $null -ne $GateEnter) {
+            return (& $DenyRejected "WRITE FIELD: gate declares terminal write fields (data_sha256/terminal_id/enter) but command is not a terminal write. SHA256: $Hash")
+        }
+    } else {
+        if ($null -eq $GateDataSha) {
+            return (& $DenyRejected "WRITE FIELD: terminal write requires data_sha256 in gate. SHA256: $Hash")
+        }
+        if ($null -eq $GateTermId) {
+            return (& $DenyRejected "WRITE FIELD: terminal write requires terminal_id in gate. SHA256: $Hash")
+        }
+        if ($null -eq $GateEnter) {
+            return (& $DenyRejected "WRITE FIELD: terminal write requires enter in gate. SHA256: $Hash")
+        }
+
+        $tokens = $null; $parseErrors = $null
+        $cmdAst = [System.Management.Automation.Language.Parser]::ParseInput(
+            $Command, [ref]$tokens, [ref]$parseErrors
+        ).FindAll({ $args[0] -is [System.Management.Automation.Language.CommandAst] }, $true) |
+            Select-Object -First 1
+
+        $ActualTermId = $null; $ActualData = $null; $ActualEnter = $null
+
+        if ($cmdAst) {
+            $elements = @($cmdAst.CommandElements)
+            for ($i = 0; $i -lt $elements.Count; $i++) {
+                $el = $elements[$i]
+                if ($el -isnot [System.Management.Automation.Language.CommandParameterAst]) { continue }
+                $pName = $el.ParameterName
+                $argAst = if ($el.Argument) { $el.Argument }
+                          elseif ($i + 1 -lt $elements.Count -and
+                                  $elements[$i + 1] -isnot [System.Management.Automation.Language.CommandParameterAst]) {
+                              $elements[$i + 1]
+                          } else { $null }
+
+                if ($pName -ieq 'Uri' -and $argAst) {
+                    $uriText = $argAst.Extent.Text.Trim("'`"")
+                    if ($uriText -match '/term/([^/]+)/write') {
+                        $ActualTermId = $Matches[1]
+                    }
+                }
+
+                if ($pName -ieq 'Body' -and $argAst) {
+                    $htAst = $argAst.FindAll(
+                        { $args[0] -is [System.Management.Automation.Language.HashtableAst] }, $true
+                    ) | Select-Object -First 1
+                    if ($htAst) {
+                        foreach ($kvp in $htAst.KeyValuePairs) {
+                            $kText = $kvp.Item1.Extent.Text.Trim("'`"")
+                            if ($kText -eq 'data') {
+                                $vText = $kvp.Item2.Extent.Text
+                                if ($vText.Length -ge 2 -and $vText[0] -eq "'") {
+                                    $ActualData = $vText.Substring(1, $vText.Length - 2) -replace "''", "'"
+                                }
+                            }
+                            if ($kText -eq 'enter') {
+                                $eText = $kvp.Item2.Extent.Text.Trim()
+                                if ($eText -eq '$true'  -or $eText -match '^\(\s*1\s+-eq\s+1\s*\)$') { $ActualEnter = $true }
+                                if ($eText -eq '$false' -or $eText -match '^\(\s*1\s+-eq\s+0\s*\)$') { $ActualEnter = $false }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if ($null -eq $ActualTermId) {
+            return (& $DenyRejected "WRITE FIELD: cannot extract terminal_id from command URI. SHA256: $Hash")
+        }
+        if ($GateTermId -ne $ActualTermId) {
+            return (& $DenyRejected "WRITE FIELD: terminal_id mismatch: gate='$GateTermId' command='$ActualTermId'. SHA256: $Hash")
+        }
+        if ($null -eq $ActualEnter) {
+            return (& $DenyRejected "WRITE FIELD: cannot extract enter from command body. SHA256: $Hash")
+        }
+        if ($GateEnter -ne $ActualEnter) {
+            return (& $DenyRejected "WRITE FIELD: enter mismatch: gate=$GateEnter command=$ActualEnter. SHA256: $Hash")
+        }
+        if ($null -eq $ActualData) {
+            return (& $DenyRejected "WRITE FIELD: cannot extract data from command body. SHA256: $Hash")
+        }
+        $ActualDataSha = Get-Sha256 -Text $ActualData
+        if ($GateDataSha -ne $ActualDataSha) {
+            return (& $DenyRejected "WRITE FIELD: data_sha256 mismatch: gate='$GateDataSha' computed='$ActualDataSha'. SHA256: $Hash")
+        }
+
+        try {
+            $Utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+            $gateText = [System.IO.File]::ReadAllText($MatchedGateFile.FullName, [System.Text.Encoding]::UTF8)
+            $gateObj = $gateText | ConvertFrom-Json
+            $gateObj | Add-Member -NotePropertyName 'data_sha256'  -NotePropertyValue $ActualDataSha  -Force
+            $gateObj | Add-Member -NotePropertyName 'terminal_id'  -NotePropertyValue $ActualTermId   -Force
+            $gateObj | Add-Member -NotePropertyName 'enter'        -NotePropertyValue $ActualEnter    -Force
+            [System.IO.File]::WriteAllText(
+                $MatchedGateFile.FullName,
+                ($gateObj | ConvertTo-Json -Depth 10),
+                $Utf8NoBom)
+        } catch {
+            return (& $DenyRejected "WRITE FIELD: failed to stamp verified fields into gate: $_. SHA256: $Hash")
+        }
+    }
+
     $InflightDir = Join-Path $GateRoot 'inflight'
     $InflightName = $MatchedGateFile.Name
     if ($ToolUseId) {

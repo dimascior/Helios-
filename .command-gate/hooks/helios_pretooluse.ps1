@@ -12,6 +12,57 @@ $ErrorActionPreference = 'Stop'
 
 $GateRoot = Split-Path $PSScriptRoot -Parent
 
+# Bounded stage tracing for the PreToolUse decision gap. This writes one small
+# JSONL record per stage outside both repositories and never scans evidence.
+$script:HeliosTraceRunId = [guid]::NewGuid().ToString('N')
+$script:HeliosTraceClock = [System.Diagnostics.Stopwatch]::StartNew()
+$script:HeliosTracePath = Join-Path $env:LOCALAPPDATA 'HeliosPreToolUseDiagnostics\stage-trace.jsonl'
+$script:HeliosTraceToolUseId = ''
+$script:HeliosTraceCommandSha256 = ''
+
+function Write-HeliosPreToolTrace {
+    param(
+        [Parameter(Mandatory)][string]$Stage,
+        [string]$ErrorType = '',
+        [string]$ErrorMessage = ''
+    )
+    try {
+        $message = [string]$ErrorMessage
+        if ($message.Length -gt 512) { $message = $message.Substring(0, 512) }
+        $entry = [ordered]@{
+            timestamp_utc  = (Get-Date).ToUniversalTime().ToString('o')
+            run_id         = $script:HeliosTraceRunId
+            process_id     = $PID
+            tool_use_id    = $script:HeliosTraceToolUseId
+            command_sha256 = $script:HeliosTraceCommandSha256
+            stage          = $Stage
+            elapsed_ms     = [Math]::Round($script:HeliosTraceClock.Elapsed.TotalMilliseconds, 3)
+            error_type     = [string]$ErrorType
+            error_message  = $message
+        }
+        $line = $entry | ConvertTo-Json -Depth 3 -Compress
+        $traceDir = [System.IO.Path]::GetDirectoryName($script:HeliosTracePath)
+        [System.IO.Directory]::CreateDirectory($traceDir) | Out-Null
+        [System.IO.File]::AppendAllText($script:HeliosTracePath, $line + [Environment]::NewLine, [System.Text.UTF8Encoding]::new($false))
+    } catch {}
+}
+
+function Write-HeliosHookResponse {
+    param([Parameter(Mandatory)][string]$Text)
+    Write-HeliosPreToolTrace -Stage 'STDOUT_RESPONSE_START'
+    try {
+        Write-Output $Text
+    } catch {
+        $traceError = $_.Exception
+        Write-HeliosPreToolTrace -Stage 'STDOUT_RESPONSE_EXCEPTION' -ErrorType $traceError.GetType().FullName -ErrorMessage $traceError.Message
+        Write-HeliosPreToolTrace -Stage 'HOOK_PROCESS_EXCEPTION' -ErrorType $traceError.GetType().FullName -ErrorMessage $traceError.Message
+        throw
+    }
+    Write-HeliosPreToolTrace -Stage 'STDOUT_RESPONSE_END'
+}
+
+Write-HeliosPreToolTrace -Stage 'HOOK_PROCESS_START'
+
 # --- Wire protocol constants ---
 
 $script:HeliosGateSchemaVersion = 'command-gate.v1'
@@ -42,7 +93,8 @@ function Deny {
             permissionDecisionReason = $Reason
         }
     }
-    Write-Output ($Out | ConvertTo-Json -Depth 5 -Compress)
+    Write-HeliosHookResponse -Text ($Out | ConvertTo-Json -Depth 5 -Compress)
+    Write-HeliosPreToolTrace -Stage 'HOOK_PROCESS_NORMAL_EXIT'
     exit 0
 }
 
@@ -104,7 +156,10 @@ function Write-IntegrityDecision {
         }
         $path = Join-Path $dir "$ToolUseId.decision.json"
         $Data | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $path -Encoding UTF8
-    } catch {}
+    } catch {
+        $traceError = $_.Exception
+        Write-HeliosPreToolTrace -Stage 'DECISION_WRITE_EXCEPTION' -ErrorType $traceError.GetType().FullName -ErrorMessage $traceError.Message
+    }
 }
 
 # --- Slim payload normalization ---
@@ -526,12 +581,27 @@ function Invoke-HeliosVirtualOperation {
 # --- Dot-source guard: export functions only ---
 if ($HeliosDotSourceFunctionsOnly) { return }
 
+trap {
+    $traceError = $_.Exception
+    $traceType = ''
+    $traceMessage = ''
+    if ($null -ne $traceError) {
+        $traceType = $traceError.GetType().FullName
+        $traceMessage = $traceError.Message
+    }
+    Write-HeliosPreToolTrace -Stage 'HOOK_PROCESS_EXCEPTION' -ErrorType $traceType -ErrorMessage $traceMessage
+    break
+}
+
 # --- Step 1: Read stdin ---
 
+Write-HeliosPreToolTrace -Stage 'INPUT_PARSE_START'
 $RawInput = $null
 try {
     $RawInput = [Console]::In.ReadToEnd()
 } catch {
+    $traceError = $_.Exception
+    Write-HeliosPreToolTrace -Stage 'HOOK_PROCESS_EXCEPTION' -ErrorType $traceError.GetType().FullName -ErrorMessage $traceError.Message
     DenyFatal 'Cannot read stdin'
 }
 
@@ -543,15 +613,22 @@ $Payload = $null
 try {
     $Payload = $RawInput | ConvertFrom-Json
 } catch {
+    $traceError = $_.Exception
+    Write-HeliosPreToolTrace -Stage 'HOOK_PROCESS_EXCEPTION' -ErrorType $traceError.GetType().FullName -ErrorMessage $traceError.Message
     DenyFatal "Cannot parse hook payload: $($_.Exception.Message)"
 }
+Write-HeliosPreToolTrace -Stage 'INPUT_PARSE_END'
 
 # --- Step 2: Non-shell passthrough + normalization ---
 
+Write-HeliosPreToolTrace -Stage 'CANONICALIZATION_START'
 $Canonical = Get-HeliosCanonicalRequest -Payload $Payload
+$script:HeliosTraceToolUseId = [string]$Canonical.tool_use_id
 
 if (-not $Canonical.is_exec_tool) {
-    Write-Output '{}'
+    Write-HeliosPreToolTrace -Stage 'CANONICALIZATION_END'
+    Write-HeliosHookResponse -Text '{}'
+    Write-HeliosPreToolTrace -Stage 'HOOK_PROCESS_NORMAL_EXIT'
     exit 0
 }
 
@@ -566,9 +643,12 @@ $CommandHash = ''
 if ($Command) {
     $CommandHash = Get-TextSha256 -Text $Command
 }
+$script:HeliosTraceCommandSha256 = $CommandHash
+Write-HeliosPreToolTrace -Stage 'CANONICALIZATION_END'
 
 # --- Step 3: Locate manifest ---
 
+Write-HeliosPreToolTrace -Stage 'CONTROL_PLANE_INTEGRITY_START'
 $ManifestPath = Join-Path $GateRoot 'manifest\helios-envelope.json'
 $SidecarPath  = Join-Path $GateRoot 'manifest\helios-envelope.sha256'
 
@@ -753,6 +833,7 @@ if ($ProtectedResult.verdict -ne 'CLEAN') {
 }
 
 # --- Step 12b: Load session_continuity (verified) for corridor + continuity ---
+Write-HeliosPreToolTrace -Stage 'CONTROL_PLANE_INTEGRITY_END'
 $SCPath = Join-Path $GateRoot 'hooks\session_continuity.ps1'
 if (Test-Path $SCPath) { . $SCPath }
 
@@ -816,6 +897,7 @@ if ($null -ne $VirtualReq) {
 
 # --- Step 13: Write before snapshot ---
 
+Write-HeliosPreToolTrace -Stage 'BEFORE_SNAPSHOT_WRITE_START'
 $ControlPlaneSnapshot = $null
 $CPWatcherPath = Join-Path $GateRoot 'hooks\control_plane_watcher.ps1'
 try {
@@ -873,26 +955,37 @@ Write-HeliosIntegrityEvidence -GateRoot $GateRoot -SessionId $SessionId -ToolUse
         continuity_break       = $ContinuityBreak
     } | Out-Null
 
+Write-HeliosPreToolTrace -Stage 'BEFORE_SNAPSHOT_WRITE_END'
+
 # --- Step 14: Load tier_classifier and gate_check (both now verified) ---
 
-. (Join-Path $GateRoot 'hooks\tier_classifier.ps1')
+Write-HeliosPreToolTrace -Stage 'GATE_CHECK_START'
+try {
+    . (Join-Path $GateRoot 'hooks\tier_classifier.ps1')
 
-$script:HeliosFrontControllerActive = $true
-$script:HeliosWireContext = @{
-    schema_sha256 = $ManifestHashes[$script:HeliosSchemaRelPath]
-    effective_cwd = $Cwd
-    tool_name     = $ToolName
+    $script:HeliosFrontControllerActive = $true
+    $script:HeliosWireContext = @{
+        schema_sha256 = $ManifestHashes[$script:HeliosSchemaRelPath]
+        effective_cwd = $Cwd
+        tool_name     = $ToolName
+    }
+    . (Join-Path $GateRoot 'hooks\gate_check.ps1')
+
+    # gate_check.ps1 overrides DenyFatal with Write-Error + exit 2, which does not
+    # produce deny JSON on stdout. Re-apply front controller's version.
+    function DenyFatal { param([string]$Reason); Deny $Reason }
+
+    $GateResult = Invoke-GateValidation -Payload $Payload
+} catch {
+    $traceError = $_.Exception
+    Write-HeliosPreToolTrace -Stage 'GATE_CHECK_EXCEPTION' -ErrorType $traceError.GetType().FullName -ErrorMessage $traceError.Message
+    throw
 }
-. (Join-Path $GateRoot 'hooks\gate_check.ps1')
-
-# gate_check.ps1 overrides DenyFatal with Write-Error + exit 2, which does not
-# produce deny JSON on stdout. Re-apply front controller's version.
-function DenyFatal { param([string]$Reason); Deny $Reason }
-
-$GateResult = Invoke-GateValidation -Payload $Payload
+Write-HeliosPreToolTrace -Stage 'GATE_CHECK_END'
 
 # --- Step 15: Write decision evidence ---
 
+Write-HeliosPreToolTrace -Stage 'DECISION_BUILD_START'
 $DecisionVerdict = switch ($GateResult.action) {
     'allow'       { 'ALLOW' }
     'deny'        { 'DENY' }
@@ -901,7 +994,7 @@ $DecisionVerdict = switch ($GateResult.action) {
     default       { 'UNKNOWN' }
 }
 
-Write-IntegrityDecision -SessionId $SessionId -ToolUseId $ToolUseId -Data @{
+$DecisionEvidence = @{
     timestamp_utc    = (Get-Date).ToUniversalTime().ToString('o')
     verdict          = $DecisionVerdict
     reason           = if ($GateResult.reason) { $GateResult.reason } elseif ($GateResult.message) { $GateResult.message } else { $null }
@@ -912,7 +1005,11 @@ Write-IntegrityDecision -SessionId $SessionId -ToolUseId $ToolUseId -Data @{
     session_id       = $SessionId
     tool_use_id      = $ToolUseId
 }
+Write-HeliosPreToolTrace -Stage 'DECISION_BUILD_END'
 
+Write-HeliosPreToolTrace -Stage 'DECISION_WRITE_START'
+Write-IntegrityDecision -SessionId $SessionId -ToolUseId $ToolUseId -Data $DecisionEvidence
+Write-HeliosPreToolTrace -Stage 'DECISION_WRITE_END'
 try {
     if (Get-Command Write-SessionLedgerEntry -ErrorAction SilentlyContinue) {
         Write-SessionLedgerEntry -GateRoot $GateRoot -SessionId $SessionId `
@@ -929,9 +1026,17 @@ try {
 # --- Step 16: Exit with appropriate behavior ---
 
 switch ($GateResult.action) {
-    'passthrough' { Write-Output '{}'; exit 0 }
-    'allow'       { Write-Output '{}'; exit 0 }
-    'deny'        { Deny $GateResult.reason }
+    'passthrough' {
+        Write-HeliosHookResponse -Text '{}'
+        Write-HeliosPreToolTrace -Stage 'HOOK_PROCESS_NORMAL_EXIT'
+        exit 0
+    }
+    'allow' {
+        Write-HeliosHookResponse -Text '{}'
+        Write-HeliosPreToolTrace -Stage 'HOOK_PROCESS_NORMAL_EXIT'
+        exit 0
+    }
+    'deny'        { $denyMsg = if ($GateResult.display) { $GateResult.display } else { $GateResult.reason }; Deny $denyMsg }
     'fatal'       { DenyFatal $GateResult.message }
     default       { DenyFatal "Unexpected gate result: $($GateResult.action)" }
 }

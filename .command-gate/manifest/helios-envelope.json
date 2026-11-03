@@ -1,36 +1,43 @@
 {
-    "schema_version":  "helios-envelope.v1",
-    "created_utc":  "2026-06-30T15:42:47Z",
-    "rebaselined_by":  "posttooluse-diagnostic-instrumentation",
-    "protected":  {
-                      "description":  "Must not change during gated execution",
-                      "paths":  [
-                                    "hooks/gate_check.ps1",
-                                    "hooks/evidence_capture.ps1",
-                                    "hooks/tier_classifier.ps1",
-                                    "hooks/helios_pretooluse.ps1",
-                                    "hooks/lib/HeliosIntegrityBridge.ps1",
-                                    "policy/command-policy.json",
-                                    "manifest/helios-envelope.json",
-                                    "manifest/helios-envelope.sha256"
-                                ],
-                      "hashes":  {
-                                     "hooks/evidence_capture.ps1":  "677871a087e56543eeeb865116cb2a7e9713f1c31a2a8d8cad7cc9af0c1db077",
-                                     "hooks/gate_check.ps1":  "564b1dc1dc03c690a589e6d91560e2626c31d6467181fa30e05e5dd125b0a850",
-                                     "hooks/helios_pretooluse.ps1":  "0a9708f3902611042d694d56f81a7f3b58eeb871f35d137091bf45ce7ec7fddc",
-                                     "hooks/lib/HeliosIntegrityBridge.ps1":  "ba6c9576cee58c561d379565e533fdef6bbc6fbf709179a33299d51d859757c7",
-                                     "hooks/tier_classifier.ps1":  "289f3158afe070327a967bcd786744931b2650651c4847ef06498b21c0dc95e2",
-                                     "policy/command-policy.json":  "e373c3dcf11e7bf06a2221e816a9f669eb0f832e549f4b26a9b7bc28053373ac"
-                                 }
-                  },
-    "mutable":  {
-                    "description":  "Must change as part of gate lifecycle",
-                    "dirs":  [
-                                 "pending/",
-                                 "inflight/",
-                                 "evidence/",
-                                 "blocked/"
-                             ]
-                },
-    "note":  "Fixed em dash encoding issue on line 610 that caused parse failure."
+    "schema_version": "helios-envelope.v1",
+    "created_utc": "2026-11-03T05:35:06Z",
+    "rebaselined_by": "human",
+    "protected": {
+        "description": "Must not change during gated execution",
+        "paths": [
+            "hooks/helios_pretooluse.ps1",
+            "hooks/gate_check.ps1",
+            "hooks/evidence_capture.ps1",
+            "hooks/tier_classifier.ps1",
+            "hooks/command_decomposer.ps1",
+            "hooks/session_continuity.ps1",
+            "hooks/control_plane_watcher.ps1",
+            "hooks/lib/HeliosIntegrityBridge.ps1",
+            "policy/command-policy.json",
+            "schema/helios-gate.schema.json",
+            "manifest/helios-envelope.json",
+            "manifest/helios-envelope.sha256"
+        ],
+        "hashes": {
+            "hooks/helios_pretooluse.ps1": "fd972559b3e8ccaf2cc2c1a6c848aa671bcfc738704c6e2967b88ebe0ea7b96f",
+            "hooks/gate_check.ps1": "eca88ee5cc7a84e23e4e1cfca57b8d508f5411a6bc0bcbd5b158507a37d3a769",
+            "hooks/evidence_capture.ps1": "677871a087e56543eeeb865116cb2a7e9713f1c31a2a8d8cad7cc9af0c1db077",
+            "hooks/tier_classifier.ps1": "289f3158afe070327a967bcd786744931b2650651c4847ef06498b21c0dc95e2",
+            "hooks/command_decomposer.ps1": "88c8cc384bb333609d428aa36c34761aaf45b1f3290e5ec706147bc447d6363e",
+            "hooks/session_continuity.ps1": "fd76c1e087cfb0e30f09cd47acd8630f378d4f0a17ac4d945a59f49c1ee9ef13",
+            "hooks/control_plane_watcher.ps1": "c69807f0274ad54e74d065d3bdb25052514c50fce7731bf056dba65597a730ab",
+            "hooks/lib/HeliosIntegrityBridge.ps1": "ba6c9576cee58c561d379565e533fdef6bbc6fbf709179a33299d51d859757c7",
+            "policy/command-policy.json": "3f9b78bbb83eeb59f9953167972fc5a84d2c48500a4c822c7756de33664938bc",
+            "schema/helios-gate.schema.json": "b5640d107a31d2d186bc0d8b6fac94c2b6d1ff9cee73e45ba2e6299dfb79c2a6"
+        }
+    },
+    "mutable": {
+        "description": "Must change as part of gate lifecycle",
+        "dirs": [
+            "pending/",
+            "inflight/",
+            "evidence/",
+            "blocked/"
+        ]
+    }
 }

@@ -70,7 +70,10 @@
         "new_chain": "boolean - chain linkage; see section 'chain'",
         "wrapped_command": "string - wrapper identity; see section 'wrapper'",
         "wrapped_command_sha256": "string - wrapper identity; see section 'wrapper'",
-        "wrapper_reason": "string - wrapper identity; see section 'wrapper'"
+        "wrapper_reason": "string - wrapper identity; see section 'wrapper'",
+        "data_sha256": "string - terminal write fields; see section 'terminal_write'",
+        "terminal_id": "string - terminal write fields; see section 'terminal_write'",
+        "enter": "boolean - terminal write fields; see section 'terminal_write'"
       }
     },
     "enums": {
@@ -116,6 +119,16 @@
         "wrapped_command_sha256": "SHA-256 of wrapped_command (UTF-8); recomputed and compared at validation",
         "wrapper_reason": "why the wrapper is needed (typically: nonzero exit is expected diagnostic output that must be captured)"
       }
+    },
+    "terminal_write": {
+      "when": "The command targets CODEAPI /term/:id/write. Required for all terminal write commands; rejected on any other command.",
+      "fields": {
+        "data_sha256": "SHA-256 of the write payload's data field (UTF-8); the agent declares the expected hash, the hook extracts data from the command AST (Parser.ParseInput) and rejects on mismatch",
+        "terminal_id": "the terminal identifier from the write URI path (/term/<terminal_id>/write); extracted from the -Uri parameter by the hook and compared against the gate declaration",
+        "enter": "boolean; whether the write appends a CR; extracted from the -Body hashtable by the hook and compared against the gate declaration"
+      },
+      "verification": "The hook always overwrites the gate's declared values with the AST-extracted values before moving to inflight. An agent-declared hash that does not match the actual command is rejected. If extraction fails (unparseable command, missing parameter), the gate is rejected — the hook never passes an unverifiable write through.",
+      "codeapi_guard": "CODEAPI's gate_guard.py independently checks inflight gates against the actual HTTP write payload (data_sha256, terminal_id, enter, expires_utc). A write that bypassed the hook (fetch, node_repl) has no matching gate in inflight and gets 403."
     },
     "ttl": {
       "contract": "created_utc and expires_utc are ISO-8601 UTC. Expired gates are rejected. Gates are single-use: on successful validation the gate file moves from pending/ to inflight/ and cannot authorize a second execution. Recommended TTL: at most 24 hours; scaffolds suggest 1 hour."
