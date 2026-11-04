@@ -417,6 +417,26 @@ function Invoke-GateValidation {
             $Reasons += "missing base fields: $($MissingBase -join ', ')"
         }
 
+        # correlation_id names this gate's evidence files, so it has to work as a file
+        # name and can't belong to an earlier command. Only gates matching this command
+        # reach here. This can't see a command that is still running, so evidence_capture
+        # refuses to replace files as well.
+        $GateCorrelationId = "$($gate.correlation_id)"
+        if (-not [string]::IsNullOrWhiteSpace($GateCorrelationId)) {
+            if ($GateCorrelationId -notmatch '\A[A-Za-z0-9._-]{1,120}\z') {
+                $ShownId = $GateCorrelationId.Substring(0, [Math]::Min(130, $GateCorrelationId.Length))
+                $Reasons += "correlation_id is not usable in a file name: '$ShownId'. Use letters, digits, dot, underscore and hyphen, 120 characters at most."
+            } else {
+                $UsedResults = @()
+                try {
+                    $UsedResults = @([System.IO.Directory]::GetFiles((Join-Path $GateRoot 'evidence'), "????????-$GateCorrelationId.result.json"))
+                } catch {}
+                if ($UsedResults.Count -gt 0) {
+                    $Reasons += "correlation_id already used: '$GateCorrelationId' has evidence in $([System.IO.Path]::GetFileName($UsedResults[0])). Give this gate a new correlation_id."
+                }
+            }
+        }
+
         $ExpiresUtc = $null
         try {
             $ExpiresUtc = [DateTime]::Parse($gate.expires_utc).ToUniversalTime()

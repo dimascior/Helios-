@@ -122,6 +122,18 @@ function Compare-HeliosProtectedEnvelope {
     }
 }
 
+function New-HeliosNameSet {
+    # Case-insensitive name set (matches the -notin semantics this replaced and
+    # Windows filename semantics). Returned with the unary comma so PowerShell
+    # does not unroll the HashSet into its elements.
+    param([object[]]$Names)
+    $set = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($n in @($Names)) {
+        if ($null -ne $n) { [void]$set.Add([string]$n) }
+    }
+    return ,$set
+}
+
 function Compare-HeliosRuntimeTransition {
     param(
         [Parameter(Mandatory)][hashtable]$BeforeMutable,
@@ -136,8 +148,18 @@ function Compare-HeliosRuntimeTransition {
         $before = $BeforeMutable[$dir]
         $after  = $AfterMutable[$dir]
 
-        $added   = @($after.files | Where-Object { $_ -notin $before.files })
-        $removed = @($before.files | Where-Object { $_ -notin $after.files })
+        # Set-based diff. The previous `-notin` form scanned the whole opposite
+        # listing per element (O(n^2)); at ~22.5k evidence names that took
+        # ~95 s inside a PostToolUse hook with a 15 s budget, so the hook was
+        # killed after writing after.json and the compare witness was never
+        # produced (no compare.json since 2026-08-16). Order and duplicate
+        # semantics of the original output are preserved.
+        $beforeFiles = @($before.files)
+        $afterFiles  = @($after.files)
+        $beforeSet = New-HeliosNameSet -Names $beforeFiles
+        $afterSet  = New-HeliosNameSet -Names $afterFiles
+        $added   = @($afterFiles  | Where-Object { ($null -ne $_) -and -not $beforeSet.Contains([string]$_) })
+        $removed = @($beforeFiles | Where-Object { ($null -ne $_) -and -not $afterSet.Contains([string]$_) })
         $netChange = $after.count - $before.count
 
         $detail = @{
