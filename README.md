@@ -237,10 +237,12 @@ EXIT=0
 
 ```text
 evidence/
-  <tool_use_id>_pwd-check.gate.json        # consumed gate
-  <tool_use_id>_pwd-check.result.json       # exit code, timing, match status
-  <tool_use_id>_pwd-check.stdout.txt        # raw stdout
+  <utc-date>-pwd-check.gate.json        # consumed gate
+  <utc-date>-pwd-check.result.json      # exit code, timing, match status
+  <utc-date>-pwd-check.stdout.txt       # raw stdout
 ```
+
+Evidence is append-only. Each gate needs a new `correlation_id`: PreToolUse refuses one that already has evidence. If a run still arrives under a used id, for example because PreToolUse failed open, its files are named `<utc-date>-<correlation_id>--<tool_use_id>.*`, and nothing is replaced.
 
 **7. Evidence hook injects context** into the agent's next turn:
 
@@ -420,11 +422,11 @@ EXIT=0
 
 ```text
 evidence/
-  <tool_use_id>_push-main.gate.json
-  <tool_use_id>_push-main.result.json
-  <tool_use_id>_push-main.tool_response.json   # full Claude Code tool response (capped 1MB)
-  <tool_use_id>_push-main.stdout.txt
-  <tool_use_id>_push-main.stderr.txt            # git progress output
+  <utc-date>-push-main.gate.json
+  <utc-date>-push-main.result.json
+  <utc-date>-push-main.tool_response.json   # full tool response (capped 1MB)
+  <utc-date>-push-main.stdout.txt
+  <utc-date>-push-main.stderr.txt           # git progress output
 ```
 
 ---

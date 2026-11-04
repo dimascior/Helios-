@@ -5,6 +5,13 @@ $PreHook   = Join-Path $GateRoot 'hooks\gate_check.ps1'
 $PostHook  = Join-Path $GateRoot 'hooks\evidence_capture.ps1'
 $DemoDir   = $PSScriptRoot
 
+# Correlation ids are single-use, so each demo run needs its own.
+$RunTag    = (Get-Date).ToUniversalTime().ToString('yyyyMMddHHmmss')
+$IdT0      = "demo-$RunTag-t0-routine"
+$IdT1      = "demo-$RunTag-t1-diag"
+$IdT2      = "demo-$RunTag-t2-remote"
+$IdT3      = "demo-$RunTag-t3-modify"
+
 function Get-Sha256([string]$Text) {
     $Bytes = [System.Text.Encoding]::UTF8.GetBytes($Text)
     $Sha   = [System.Security.Cryptography.SHA256]::Create()
@@ -221,13 +228,13 @@ Write-Host ''
 Start-Sleep 2
 
 Write-Host '  Step 2: Create gate with Tier 0 required fields' -ForegroundColor DarkYellow
-$g0 = New-Gate -Id 'demo-t0-routine' -Cmd $t0cmd -Tier 0 -Fields @{
+$g0 = New-Gate -Id $IdT0 -Cmd $t0cmd -Tier 0 -Fields @{
     need         = 'Confirm working directory before file operations'
     expected     = 'Prints absolute path of current directory'
     actual_means = 'Agent knows its filesystem context'
     next_logic   = 'Proceed with file-relative commands using this path'
 }
-Label 'gate file:'     'pending/demo-t0-routine.gate.json'
+Label 'gate file:'     "pending/$IdT0.gate.json"
 Label 'command_sha256:' $g0.Hash
 Label 'risk_tier:'      '0'
 Label 'need:'           $g0.Gate.need
@@ -236,7 +243,7 @@ Write-Host ''
 Start-Sleep 2
 
 Write-Host '  Step 3: Execute through PreToolUse hook' -ForegroundColor DarkYellow
-$r = Invoke-Pre $t0cmd 'demo-t0-routine' 'Bash'
+$r = Invoke-Pre $t0cmd $IdT0 'Bash'
 if ($r.Ok) {
     Write-Host '  [PASS] ' -NoNewline -ForegroundColor Green
     Write-Host 'Gate validated — moved pending/ -> inflight/' -ForegroundColor Green
@@ -247,12 +254,12 @@ Write-Host ''
 Start-Sleep 1
 
 Write-Host '  Step 4: PostToolUse — capture evidence' -ForegroundColor DarkYellow
-Invoke-Post -Command $t0cmd -ToolUseId 'demo-t0-routine' -Stdout '/c/Users/you/project'
+Invoke-Post -Command $t0cmd -ToolUseId $IdT0 -Stdout '/c/Users/you/project'
 Write-Host '  Evidence captured — inflight/ -> evidence/' -ForegroundColor Green
 Write-Host ''
 Start-Sleep 1
 
-Show-Evidence 'demo-t0-routine'
+Show-Evidence $IdT0
 Start-Sleep 4
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -272,7 +279,7 @@ Write-Host ''
 Start-Sleep 2
 
 Write-Host '  Step 2: Create gate' -ForegroundColor DarkYellow
-$g1 = New-Gate -Id 'demo-t1-diag' -Cmd $t1cmd -Tier 1 -Shell 'powershell' -Fields @{
+$g1 = New-Gate -Id $IdT1 -Cmd $t1cmd -Tier 1 -Shell 'powershell' -Fields @{
     need         = 'Check if explorer.exe is running before UI automation'
     expected     = 'Process listing with PID, CPU, memory for explorer'
     actual_means = 'Explorer is alive and responsive — safe to send window messages'
@@ -284,18 +291,18 @@ Write-Host ''
 Start-Sleep 1
 
 Write-Host '  Step 3: PreToolUse' -ForegroundColor DarkYellow
-$r = Invoke-Pre $t1cmd 'demo-t1-diag' 'PowerShell'
+$r = Invoke-Pre $t1cmd $IdT1 'PowerShell'
 if ($r.Ok) { Write-Host '  [PASS] pending/ -> inflight/' -ForegroundColor Green }
 Write-Host ''
 
 Write-Host '  Step 4: PostToolUse' -ForegroundColor DarkYellow
 $simOut = "Handles  NPM(K)  PM(K)  WS(K)  CPU(s)    Id  ProcessName`n   1842      89  98204 142568    12.50  4820  explorer"
-Invoke-Post -Command $t1cmd -ToolUseId 'demo-t1-diag' -Stdout $simOut -ToolName 'PowerShell'
+Invoke-Post -Command $t1cmd -ToolUseId $IdT1 -Stdout $simOut -ToolName 'PowerShell'
 Write-Host '  Evidence captured — inflight/ -> evidence/' -ForegroundColor Green
 Write-Host ''
 Start-Sleep 1
 
-Show-Evidence 'demo-t1-diag'
+Show-Evidence $IdT1
 Start-Sleep 4
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -315,7 +322,7 @@ Write-Host ''
 Start-Sleep 2
 
 Write-Host '  Step 2: Create gate — Tier 2 requires stop_conditions' -ForegroundColor DarkYellow
-$g2 = New-Gate -Id 'demo-t2-remote' -Cmd $t2cmd -Tier 2 -Fields @{
+$g2 = New-Gate -Id $IdT2 -Cmd $t2cmd -Tier 2 -Fields @{
     need            = 'Verify local API server is healthy before running integration tests'
     expected        = 'JSON response with status: ok and uptime > 0'
     actual_means    = 'Server is ready to accept test traffic'
@@ -328,17 +335,17 @@ Write-Host ''
 Start-Sleep 1
 
 Write-Host '  Step 3: PreToolUse' -ForegroundColor DarkYellow
-$r = Invoke-Pre $t2cmd 'demo-t2-remote'
+$r = Invoke-Pre $t2cmd $IdT2
 if ($r.Ok) { Write-Host '  [PASS] pending/ -> inflight/' -ForegroundColor Green }
 Write-Host ''
 
 Write-Host '  Step 4: PostToolUse' -ForegroundColor DarkYellow
-Invoke-Post -Command $t2cmd -ToolUseId 'demo-t2-remote' -Stdout '{"status":"ok","uptime":3842,"version":"2.1.0"}'
+Invoke-Post -Command $t2cmd -ToolUseId $IdT2 -Stdout '{"status":"ok","uptime":3842,"version":"2.1.0"}'
 Write-Host '  Evidence captured — inflight/ -> evidence/' -ForegroundColor Green
 Write-Host ''
 Start-Sleep 1
 
-Show-Evidence 'demo-t2-remote'
+Show-Evidence $IdT2
 Start-Sleep 4
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -358,7 +365,7 @@ Write-Host ''
 Start-Sleep 2
 
 Write-Host '  Step 2: Create gate — Tier 3 requires stop_conditions + read_write_impact' -ForegroundColor DarkYellow
-$g3 = New-Gate -Id 'demo-t3-modify' -Cmd $t3cmd -Tier 3 -Fields @{
+$g3 = New-Gate -Id $IdT3 -Cmd $t3cmd -Tier 3 -Fields @{
     need              = 'Push committed README update to remote'
     expected          = 'Push succeeds: local main -> origin/main fast-forward'
     actual_means      = 'Remote repository now has the latest documentation'
@@ -376,17 +383,17 @@ Write-Host ''
 Start-Sleep 1
 
 Write-Host '  Step 3: PreToolUse' -ForegroundColor DarkYellow
-$r = Invoke-Pre $t3cmd 'demo-t3-modify'
+$r = Invoke-Pre $t3cmd $IdT3
 if ($r.Ok) { Write-Host '  [PASS] pending/ -> inflight/' -ForegroundColor Green }
 Write-Host ''
 
 Write-Host '  Step 4: PostToolUse' -ForegroundColor DarkYellow
-Invoke-Post -Command $t3cmd -ToolUseId 'demo-t3-modify' -Stdout 'To https://github.com/user/repo.git  abc1234..def5678  main -> main'
+Invoke-Post -Command $t3cmd -ToolUseId $IdT3 -Stdout 'To https://github.com/user/repo.git  abc1234..def5678  main -> main'
 Write-Host '  Evidence captured — inflight/ -> evidence/' -ForegroundColor Green
 Write-Host ''
 Start-Sleep 1
 
-Show-Evidence 'demo-t3-modify'
+Show-Evidence $IdT3
 Start-Sleep 4
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

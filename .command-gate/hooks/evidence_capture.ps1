@@ -80,6 +80,49 @@ function Parse-ExitMarker {
     return $null
 }
 
+# --- Evidence files ---
+# Evidence is append-only: one tool call gets one family of files, and nothing in
+# this hook replaces an existing file.
+
+# Same bytes as WriteAllText with UTF8, BOM included, but fails if the file exists.
+function Write-EvidenceFileNew {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Text
+    )
+    $Encoding = [System.Text.Encoding]::UTF8
+    $Preamble = $Encoding.GetPreamble()
+    $Body = $Encoding.GetBytes($Text)
+    $Stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::Read)
+    try {
+        $Stream.Write($Preamble, 0, $Preamble.Length)
+        $Stream.Write($Body, 0, $Body.Length)
+    } finally {
+        $Stream.Dispose()
+    }
+}
+
+# An id reaches this hook unchecked when PreToolUse failed open. One with a path
+# separator or wildcard would lose the result or write outside the evidence folder.
+function ConvertTo-EvidenceNamePart {
+    param([AllowEmptyString()][string]$Value)
+    $Safe = $Value -replace '[^A-Za-z0-9._-]', '_'
+    if ($Safe.Length -gt 120) {
+        $Safe = $Safe.Substring(0, 100) + '-' + (Get-Sha256 $Value).Substring(0, 12)
+    }
+    return $Safe
+}
+
+function Test-EvidenceFamilyExists {
+    param([string]$Directory, [string]$Prefix)
+    foreach ($Suffix in @('.result.json', '.gate.json', '.tool_response.json', '.stdout.txt', '.stderr.txt')) {
+        if ([System.IO.File]::Exists([System.IO.Path]::Combine($Directory, "$Prefix$Suffix"))) {
+            return $true
+        }
+    }
+    return $false
+}
+
 # --- MAIN ---
 
 Write-PostToolHeartbeat -Checkpoint 'started'
@@ -385,7 +428,17 @@ try {
     Write-PostToolHeartbeat -Checkpoint 'err_continuity' -Detail $_.Exception.Message
 }
 
-$FilePrefix = "$DatePrefix-$CorrelationId"
+# One tool call, one family of files. The first use of an id keeps the plain name.
+# A reused id, or one that can't be used in a file name, also carries the tool call.
+$SafeCorrelationId = ConvertTo-EvidenceNamePart "$CorrelationId"
+$PlainPrefix = "$DatePrefix-$SafeCorrelationId"
+$CallPart = if ($ToolUseId) { ConvertTo-EvidenceNamePart "$ToolUseId" } else { $NowUtc.ToString('HHmmssfffffff') }
+$CallPrefix = "$PlainPrefix--$CallPart"
+$FilePrefix = $PlainPrefix
+if (($SafeCorrelationId -cne "$CorrelationId") -or (Test-EvidenceFamilyExists $EvidenceDir $PlainPrefix)) {
+    $FilePrefix = $CallPrefix
+    Write-PostToolHeartbeat -Checkpoint 'evidence_prefix_call' -Detail "cid=$CorrelationId prefix=$FilePrefix"
+}
 
 # Write .result.json
 $Result = [ordered]@{
@@ -425,10 +478,38 @@ $Result = [ordered]@{
     session_continuity_status = $SessionContinuityStatus
 }
 
+# Codex reports no duration, so the catalog can't derive a start from one. When the
+# host gives no duration, record when PreToolUse admitted this tool call. That marks
+# admission, just before the command begins. Hosts that report a duration are left
+# alone, so the catalog keeps deriving their start from it.
+if ($null -eq $DurationMs -and $SessionId -and $ToolUseId) {
+    try {
+        $DecisionPath = Join-Path $GateRoot "evidence\integrity\sessions\$SessionId\commands\$ToolUseId.decision.json"
+        if (Test-Path -LiteralPath $DecisionPath) {
+            $Decision = Get-Content -LiteralPath $DecisionPath -Raw | ConvertFrom-Json
+            if ($Decision.verdict -eq 'ALLOW' -and $Decision.timestamp_utc) {
+                $Result['started_utc'] = [string]$Decision.timestamp_utc
+                $Result['started_utc_source'] = 'pretooluse_decision'
+            }
+        }
+    } catch {
+        Write-PostToolHeartbeat -Checkpoint 'err_started_utc' -Detail $_.Exception.Message
+    }
+}
+
 $ResultJson = $Result | ConvertTo-Json -Depth 5
 $ResultPath = Join-Path $EvidenceDir "$FilePrefix.result.json"
 try {
-    [System.IO.File]::WriteAllText($ResultPath, $ResultJson, [System.Text.Encoding]::UTF8)
+    try {
+        Write-EvidenceFileNew -Path $ResultPath -Text $ResultJson
+    } catch {
+        # Another call took the plain name between the check and this write.
+        if ($FilePrefix -ceq $CallPrefix) { throw }
+        $FilePrefix = $CallPrefix
+        $ResultPath = Join-Path $EvidenceDir "$FilePrefix.result.json"
+        Write-PostToolHeartbeat -Checkpoint 'evidence_prefix_call' -Detail "cid=$CorrelationId prefix=$FilePrefix race=true"
+        Write-EvidenceFileNew -Path $ResultPath -Text $ResultJson
+    }
     if (Test-Path $ResultPath) {
         Write-PostToolHeartbeat -Checkpoint 'result_written' -Detail "cid=$CorrelationId"
     } else {
@@ -455,6 +536,7 @@ try {
                 exit_code           = $ExitCode
                 hook_presence_after = $hookPresAfterFlag
                 watched_path_changes = ($null -ne $WatchedPathDiffs -and $WatchedPathDiffs.Count -gt 0)
+                evidence_prefix     = $FilePrefix
             }
         Write-PostToolHeartbeat -Checkpoint 'ledger_written'
     }
@@ -469,25 +551,31 @@ if ($null -ne $ToolResponse) {
         $TrJson = $TrJson.Substring(0, 1048576) + "`n[TRUNCATED at 1MB]"
     }
     $TrPath = Join-Path $EvidenceDir "$FilePrefix.tool_response.json"
-    try { [System.IO.File]::WriteAllText($TrPath, $TrJson, [System.Text.Encoding]::UTF8) } catch {}
+    try { Write-EvidenceFileNew -Path $TrPath -Text $TrJson } catch { Write-PostToolHeartbeat -Checkpoint 'err_tool_response_write' -Detail $_.Exception.Message }
 }
 
 # Write .stdout.txt
 if ($Stdout) {
     $StdoutPath = Join-Path $EvidenceDir "$FilePrefix.stdout.txt"
-    try { [System.IO.File]::WriteAllText($StdoutPath, $Stdout, [System.Text.Encoding]::UTF8) } catch {}
+    try { Write-EvidenceFileNew -Path $StdoutPath -Text $Stdout } catch { Write-PostToolHeartbeat -Checkpoint 'err_stdout_write' -Detail $_.Exception.Message }
 }
 
 # Write .stderr.txt
 if ($Stderr -and $Stderr.Length -gt 0) {
     $StderrPath = Join-Path $EvidenceDir "$FilePrefix.stderr.txt"
-    try { [System.IO.File]::WriteAllText($StderrPath, $Stderr, [System.Text.Encoding]::UTF8) } catch {}
+    try { Write-EvidenceFileNew -Path $StderrPath -Text $Stderr } catch { Write-PostToolHeartbeat -Checkpoint 'err_stderr_write' -Detail $_.Exception.Message }
 }
 
 # Move gate from inflight to evidence
 if (-not $IsOrphan -and $MatchedGateFile) {
     $GateDest = Join-Path $EvidenceDir "$FilePrefix.gate.json"
-    try { Move-Item -Path $MatchedGateFile.FullName -Destination $GateDest -Force } catch {}
+    try {
+        [System.IO.File]::Move($MatchedGateFile.FullName, $GateDest)
+    } catch {
+        # The gate stays in inflight, where it can still be read and swept.
+        Write-PostToolHeartbeat -Checkpoint 'err_gate_move' -Detail $_.Exception.Message
+        Save-PostToolError -RawPayload $RawInput -Checkpoint 'gate_move' -ErrorMessage $_.Exception.Message
+    }
 }
 
 # --- Integrity evidence (Helios bridge) ---
@@ -600,6 +688,9 @@ if ($null -ne $ExitCode) {
     $ExitInfo = " Exit=$ExitCode (source: $ExitCodeSource)."
 }
 $ContextMsg = "[EVIDENCE:$CorrelationId] Command $StatusWord.$ExitInfo Compare EXPECTED from the gate vs ACTUAL output before creating the next gate."
+if ($FilePrefix -cne $PlainPrefix) {
+    $ContextMsg += " EVIDENCE NAME: this correlation id was already used today or can't be used in a file name, so this run's files are named $FilePrefix. Use a new id for each gate."
+}
 if ($IntegrityWarning) {
     $ContextMsg += $IntegrityWarning
 }
